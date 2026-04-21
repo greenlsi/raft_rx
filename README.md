@@ -1,4 +1,4 @@
-# raft
+# raft_rx
 
 Implementación de Raft sobre `rxnet` en C y Python, con:
 
