@@ -1,0 +1,33 @@
+{"event": "recv", "node_id": "n3", "payload": {"kind": "request_vote", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 0, "time_ms": 160}
+{"event": "persist", "node_id": "n3", "payload": {"log_len": 0, "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 160}
+{"event": "send", "node_id": "n3", "payload": {"kind": "request_vote_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 160}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 190}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 190}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 240}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 240}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 290}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 290}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 340}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 340}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 390}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 390}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 420}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 420}
+{"event": "persist", "node_id": "n3", "payload": {"log_len": 1, "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 420}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 420}
+{"event": "persist", "node_id": "n3", "payload": {"log_len": 2, "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 430}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 430}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 440}
+{"event": "apply", "node_id": "n3", "payload": {"command": {"key": "color", "op": "set", "value": "blue"}, "index": 1, "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 440}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 440}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 490}
+{"event": "apply", "node_id": "n3", "payload": {"command": {"key": "mode", "op": "set", "value": "active"}, "index": 2, "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 490}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 490}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 540}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 540}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 590}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 590}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 640}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 640}
+{"event": "recv", "node_id": "n3", "payload": {"kind": "append_entries", "source": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 690}
+{"event": "send", "node_id": "n3", "payload": {"kind": "append_entries_response", "target": "n1", "term": 1}, "role": "FOLLOWER", "term": 1, "time_ms": 690}
