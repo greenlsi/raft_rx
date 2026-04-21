@@ -5,8 +5,8 @@ from pathlib import Path
 
 from rxnet import fsm
 
+from .application import RaftApplication
 from .clock import Clock, ManualClock
-from .kv import KVStateMachine, KVStore
 from .messages import Command
 from .node import NodeConfig, RaftNode, Role
 from .storage import JsonFileStorage
@@ -17,7 +17,6 @@ from .transport import MemoryTransport
 @dataclass(slots=True)
 class ClusterNodePaths:
     storage_dir: Path
-    kv_path: Path
     telemetry_path: Path | None = None
 
 
@@ -27,8 +26,14 @@ class RaftCluster:
         self.transport = transport or MemoryTransport()
         self.runtime = fsm.Runtime()
         self.nodes: dict[str, RaftNode] = {}
+        self.paths: dict[str, ClusterNodePaths] = {}
 
-    def add_node(self, config: NodeConfig, paths: ClusterNodePaths) -> RaftNode:
+    def add_node(
+        self,
+        config: NodeConfig,
+        paths: ClusterNodePaths,
+        application: RaftApplication,
+    ) -> RaftNode:
         telemetry: TelemetrySink
         if paths.telemetry_path is None:
             telemetry = NullTelemetrySink()
@@ -39,10 +44,11 @@ class RaftCluster:
             clock=self.clock,
             transport=self.transport,
             storage=JsonFileStorage(paths.storage_dir, config.node_id),
-            state_machine=KVStateMachine(KVStore(paths.kv_path)),
+            application=application,
             telemetry=telemetry,
         )
         self.nodes[config.node_id] = node
+        self.paths[config.node_id] = paths
         self.runtime.add_machine(node.machine)
         self.runtime.build()
         return node
@@ -57,7 +63,7 @@ class RaftCluster:
             self.tick(advance_ms=advance_ms)
 
     def leader(self) -> RaftNode | None:
-        leaders = [node for node in self.nodes.values() if node.role == Role.LEADER]
+        leaders = [node for node in self.nodes.values() if node.running and node.role == Role.LEADER]
         return leaders[0] if leaders else None
 
     def submit_to_leader(self, command: Command) -> bool:
@@ -69,3 +75,16 @@ class RaftCluster:
 
     def summaries(self) -> list[dict[str, object]]:
         return [node.summary() for node in self.nodes.values()]
+
+    def stop_node(self, node_id: str) -> None:
+        self.nodes[node_id].stop()
+
+    def start_node(self, node_id: str) -> None:
+        self.nodes[node_id].start()
+
+    def restart_node(self, node_id: str) -> None:
+        self.stop_node(node_id)
+        self.start_node(node_id)
+
+    def node_ids(self) -> list[str]:
+        return list(self.nodes.keys())

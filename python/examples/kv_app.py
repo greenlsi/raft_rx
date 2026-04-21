@@ -3,20 +3,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .messages import Command
+from raft_rx import Command
 
 
-class KVStore:
+class KVApp:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.data: dict[str, str] = {}
-        self.load()
+        self.reload()
 
-    def load(self) -> None:
+    def reload(self) -> None:
         if self.path.exists():
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             self.data = {str(k): str(v) for k, v in raw.items()}
+        else:
+            self.data = {}
 
     def save(self) -> None:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -28,23 +30,11 @@ class KVStore:
             if command.value is None:
                 raise ValueError("set requires value")
             self.data[command.key] = command.value
-            return
-        if command.op == "delete":
+        elif command.op == "delete":
             self.data.pop(command.key, None)
-            return
-        raise ValueError(f"unsupported op: {command.op}")
+        else:
+            raise ValueError(f"unsupported op: {command.op}")
+        self.save()
 
     def get(self, key: str) -> str | None:
         return self.data.get(key)
-
-
-class KVStateMachine:
-    def __init__(self, store: KVStore) -> None:
-        self.store = store
-
-    def apply(self, command: Command) -> None:
-        self.store.apply(command)
-        self.store.save()
-
-    def get(self, key: str) -> str | None:
-        return self.store.get(key)

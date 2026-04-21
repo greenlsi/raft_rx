@@ -30,7 +30,7 @@
 - [x] Implementar nodo Raft sobre `rxnet.fsm`.
 - [x] Implementar clúster de simulación.
 - [x] Crear ejemplo ejecutable de base de datos distribuida.
-- [x] Crear shell externa para inspección del clúster.
+- [x] Crear shell externa para operación e inspección del clúster.
 - [x] Añadir tests de elección, replicación y recuperación.
 
 ## C

@@ -205,12 +205,12 @@ La shell de referencia:
 
 ### Python
 
+- `raft_rx.application`
 - `raft_rx.clock`
 - `raft_rx.messages`
 - `raft_rx.storage`
 - `raft_rx.transport`
 - `raft_rx.telemetry`
-- `raft_rx.kv`
 - `raft_rx.node`
 - `raft_rx.cluster`
 

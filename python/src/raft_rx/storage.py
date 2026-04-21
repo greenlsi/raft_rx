@@ -12,6 +12,7 @@ class PersistentState:
     current_term: int
     voted_for: str | None
     log: list[LogEntry]
+    commit_index: int
 
 
 class JsonFileStorage:
@@ -25,7 +26,7 @@ class JsonFileStorage:
 
     def load(self) -> PersistentState:
         if not self.meta_path.exists():
-            return PersistentState(current_term=0, voted_for=None, log=[])
+            return PersistentState(current_term=0, voted_for=None, log=[], commit_index=0)
         meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
         log_data = []
         if self.log_path.exists():
@@ -34,12 +35,23 @@ class JsonFileStorage:
             current_term=int(meta.get("current_term", 0)),
             voted_for=meta.get("voted_for"),
             log=[LogEntry.from_dict(item) for item in log_data],
+            commit_index=int(meta.get("commit_index", 0)),
         )
 
-    def save(self, current_term: int, voted_for: str | None, log: list[LogEntry]) -> None:
+    def save(
+        self,
+        current_term: int,
+        voted_for: str | None,
+        log: list[LogEntry],
+        commit_index: int,
+    ) -> None:
         self._atomic_write_json(
             self.meta_path,
-            {"current_term": current_term, "voted_for": voted_for},
+            {
+                "current_term": current_term,
+                "voted_for": voted_for,
+                "commit_index": commit_index,
+            },
         )
         self._atomic_write_json(self.log_path, [entry.to_dict() for entry in log])
 

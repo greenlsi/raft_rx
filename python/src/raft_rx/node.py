@@ -6,8 +6,8 @@ from typing import Any
 
 from rxnet import fsm
 
+from .application import RaftApplication
 from .clock import Clock
-from .kv import KVStateMachine
 from .messages import Command, LogEntry, Message, MessageKind
 from .storage import JsonFileStorage
 from .telemetry import NullTelemetrySink, TelemetrySink
@@ -28,6 +28,15 @@ class NodeConfig:
     heartbeat_interval_ms: int = 50
 
 
+@dataclass(frozen=True, slots=True)
+class TransitionSpec:
+    from_state: Role
+    to_state: Role
+    guard_name: str
+    action_name: str
+    label: str
+
+
 class RaftNode:
     def __init__(
         self,
@@ -35,27 +44,26 @@ class RaftNode:
         clock: Clock,
         transport: MemoryTransport,
         storage: JsonFileStorage,
-        state_machine: KVStateMachine,
+        application: RaftApplication,
         telemetry: TelemetrySink | None = None,
     ) -> None:
         self.config = config
         self.clock = clock
         self.transport = transport
         self.storage = storage
-        self.state_machine = state_machine
+        self.application = application
         self.telemetry = telemetry or NullTelemetrySink()
-
-        persisted = self.storage.load()
         self.node_id = config.node_id
         self.peers = list(config.peers)
-        self.current_term = persisted.current_term
-        self.voted_for = persisted.voted_for
-        self.log = list(persisted.log)
+        self.running = True
+        self.current_term = 0
+        self.voted_for: str | None = None
+        self.log: list[LogEntry] = []
         self.commit_index = 0
         self.last_applied = 0
         self.leader_id: str | None = None
         self.votes_received: set[str] = set()
-        self.next_index = {peer: len(self.log) + 1 for peer in self.peers}
+        self.next_index = {peer: 1 for peer in self.peers}
         self.match_index = {peer: 0 for peer in self.peers}
         self.outbox: list[Message] = []
         self.pending_append_entries: list[Message] = []
@@ -69,108 +77,14 @@ class RaftNode:
         self.machine = fsm.Machine(
             name=self.node_id,
             state=Role.FOLLOWER,
-            transitions=[
-                fsm.Transition(
-                    from_state=Role.FOLLOWER,
-                    to_state=Role.CANDIDATE,
-                    guard=lambda ctx, user: user._timeout_expired(),
-                    action=lambda ctx, user: user._become_candidate(),
-                    label="timeout",
-                ),
-                fsm.Transition(
-                    from_state=Role.FOLLOWER,
-                    to_state=Role.FOLLOWER,
-                    guard=lambda ctx, user: user._has_append_entries(),
-                    action=lambda ctx, user: user._handle_next_append_entries(),
-                    label="append_entries",
-                ),
-                fsm.Transition(
-                    from_state=Role.FOLLOWER,
-                    to_state=Role.FOLLOWER,
-                    guard=lambda ctx, user: user._has_vote_request(),
-                    action=lambda ctx, user: user._handle_next_vote_request(),
-                    label="vote_request",
-                ),
-                fsm.Transition(
-                    from_state=Role.FOLLOWER,
-                    to_state=Role.FOLLOWER,
-                    guard=lambda ctx, user: user._has_vote(),
-                    action=lambda ctx, user: user._ignore_vote(),
-                    label="ignore_vote",
-                ),
-                fsm.Transition(
-                    from_state=Role.CANDIDATE,
-                    to_state=Role.FOLLOWER,
-                    guard=lambda ctx, user: user._timeout_expired(),
-                    action=lambda ctx, user: user._back_to_follower_due_to_timeout(),
-                    label="candidate_timeout",
-                ),
-                fsm.Transition(
-                    from_state=Role.CANDIDATE,
-                    to_state=Role.LEADER,
-                    guard=lambda ctx, user: user._received_majority_votes(),
-                    action=lambda ctx, user: user._become_leader(),
-                    label="won-election",
-                ),
-                fsm.Transition(
-                    from_state=Role.CANDIDATE,
-                    to_state=Role.FOLLOWER,
-                    guard=lambda ctx, user: user._has_append_entries(),
-                    action=lambda ctx, user: user._handle_next_append_entries(),
-                    label="append_entries",
-                ),
-                fsm.Transition(
-                    from_state=Role.CANDIDATE,
-                    to_state=Role.CANDIDATE,
-                    guard=lambda ctx, user: user._has_vote_request(),
-                    action=lambda ctx, user: user._handle_next_vote_request(),
-                    label="vote_request",
-                ),
-                fsm.Transition(
-                    from_state=Role.CANDIDATE,
-                    to_state=Role.CANDIDATE,
-                    guard=lambda ctx, user: user._has_vote(),
-                    action=lambda ctx, user: user._handle_next_vote(),
-                    label="vote",
-                ),
-                fsm.Transition(
-                    from_state=Role.LEADER,
-                    to_state=Role.FOLLOWER,
-                    guard=lambda ctx, user: user._has_append_entries(),
-                    action=lambda ctx, user: user._handle_next_append_entries(),
-                    label="append_entries",
-                ),
-                fsm.Transition(
-                    from_state=Role.LEADER,
-                    to_state=Role.LEADER,
-                    guard=lambda ctx, user: user._has_vote_request(),
-                    action=lambda ctx, user: user._ignore_vote_request(),
-                    label="ignore_vote_request",
-                ),
-                fsm.Transition(
-                    from_state=Role.LEADER,
-                    to_state=Role.LEADER,
-                    guard=lambda ctx, user: user._has_vote(),
-                    action=lambda ctx, user: user._ignore_vote(),
-                    label="ignore_vote",
-                ),
-                fsm.Transition(
-                    from_state=Role.LEADER,
-                    to_state=Role.LEADER,
-                    guard=lambda ctx, user: user._time_for_heartbeat(),
-                    action=lambda ctx, user: user._send_heartbeat(),
-                    label="heartbeat",
-                ),
-            ],
+            transitions=self._build_transitions(),
             user=self,
             latch_inputs_cb=lambda ctx, user: user._latch_inputs(),
             dump_outputs_cb=lambda ctx, user: user._dump_outputs(),
             state_names={role: role.name for role in Role},
         )
 
-        while self.last_applied < min(self.commit_index, len(self.log)):
-            self.last_applied += 1
-            self.state_machine.apply(self.log[self.last_applied - 1].command)
+        self._load_from_storage()
 
     @property
     def role(self) -> Role:
@@ -179,12 +93,10 @@ class RaftNode:
     def submit_command(self, command: Command) -> None:
         self.transport.submit_client_command(self.node_id, command)
 
-    def get(self, key: str) -> str | None:
-        return self.state_machine.get(key)
-
     def summary(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
+            "running": self.running,
             "role": self.role.name,
             "term": self.current_term,
             "leader_id": self.leader_id,
@@ -193,7 +105,30 @@ class RaftNode:
             "last_applied": self.last_applied,
         }
 
+    def stop(self) -> None:
+        self.running = False
+        self.transport.set_enabled(self.node_id, False)
+        self.pending_append_entries.clear()
+        self.pending_vote_requests.clear()
+        self.pending_votes.clear()
+        self.outbox.clear()
+        self.votes_received.clear()
+        self.leader_id = None
+        self.machine.state = Role.FOLLOWER
+        self.machine._next_state = Role.FOLLOWER
+        self._emit("lifecycle", {"action": "stop"})
+
+    def start(self) -> None:
+        self.transport.set_enabled(self.node_id, True)
+        self._load_from_storage()
+        self.running = True
+        self.machine.state = Role.FOLLOWER
+        self.machine._next_state = Role.FOLLOWER
+        self._emit("lifecycle", {"action": "start"})
+
     def _latch_inputs(self) -> None:
+        if not self.running:
+            return
         now = self.clock.now_ms()
 
         for message in self.transport.recv_for(self.node_id):
@@ -216,15 +151,17 @@ class RaftNode:
                 self._emit("client_rejected", {"reason": "not_leader", "count": len(pending)})
 
     def _dump_outputs(self) -> None:
+        if not self.running:
+            return
         if self.persist_dirty:
-            self.storage.save(self.current_term, self.voted_for, self.log)
+            self.storage.save(self.current_term, self.voted_for, self.log, self.commit_index)
             self.persist_dirty = False
             self._emit("persist", {"term": self.current_term, "log_len": len(self.log)})
 
         while self.last_applied < self.commit_index:
             self.last_applied += 1
             entry = self.log[self.last_applied - 1]
-            self.state_machine.apply(entry.command)
+            self.application.apply(entry.command)
             self._emit(
                 "apply",
                 {
@@ -330,6 +267,7 @@ class RaftNode:
         leader_commit = int(message.payload["leader_commit"])
         if leader_commit > self.commit_index:
             self.commit_index = min(leader_commit, self._last_log_index())
+            self.persist_dirty = True
         return True
 
     def _append_client_command(self, command: Command) -> None:
@@ -452,6 +390,7 @@ class RaftNode:
                     replicated += 1
             if replicated >= self._majority():
                 self.commit_index = candidate_index
+                self.persist_dirty = True
                 break
 
     def _candidate_is_up_to_date(self, payload: dict[str, Any]) -> bool:
@@ -495,9 +434,58 @@ class RaftNode:
             {
                 "time_ms": self.clock.now_ms(),
                 "node_id": self.node_id,
+                "running": self.running,
                 "role": self.role.name,
                 "term": self.current_term,
                 "event": event_type,
                 "payload": payload,
             }
+        )
+
+    def _load_from_storage(self) -> None:
+        persisted = self.storage.load()
+        self.current_term = persisted.current_term
+        self.voted_for = persisted.voted_for
+        self.log = list(persisted.log)
+        self.commit_index = min(persisted.commit_index, len(self.log))
+        self.last_applied = 0
+        self.leader_id = None
+        self.votes_received.clear()
+        self.next_index = {peer: len(self.log) + 1 for peer in self.peers}
+        self.match_index = {peer: 0 for peer in self.peers}
+        self.outbox.clear()
+        self.pending_append_entries.clear()
+        self.pending_vote_requests.clear()
+        self.pending_votes.clear()
+        self.persist_dirty = False
+        self.application.reload()
+        self.last_contact_ms = self.clock.now_ms()
+        self.election_deadline_ms = self.last_contact_ms + self.config.election_timeout_ms
+        self.heartbeat_deadline_ms = self.last_contact_ms + self.config.heartbeat_interval_ms
+
+    def _build_transitions(self) -> list[fsm.Transition]:
+        specs = [
+            TransitionSpec(Role.FOLLOWER,  Role.CANDIDATE, "_timeout_expired",         "_become_candidate",                "timeout"),
+            TransitionSpec(Role.FOLLOWER,  Role.FOLLOWER,  "_has_append_entries",      "_handle_next_append_entries",      "append_entries"),
+            TransitionSpec(Role.FOLLOWER,  Role.FOLLOWER,  "_has_vote_request",        "_handle_next_vote_request",        "vote_request"),
+            TransitionSpec(Role.FOLLOWER,  Role.FOLLOWER,  "_has_vote",                "_ignore_vote",                     "ignore_vote"),
+            TransitionSpec(Role.CANDIDATE, Role.FOLLOWER,  "_timeout_expired",         "_back_to_follower_due_to_timeout", "candidate_timeout"),
+            TransitionSpec(Role.CANDIDATE, Role.LEADER,    "_received_majority_votes", "_become_leader",                   "won_election"),
+            TransitionSpec(Role.CANDIDATE, Role.FOLLOWER,  "_has_append_entries",      "_handle_next_append_entries",      "append_entries"),
+            TransitionSpec(Role.CANDIDATE, Role.CANDIDATE, "_has_vote_request",        "_handle_next_vote_request",        "vote_request"),
+            TransitionSpec(Role.CANDIDATE, Role.CANDIDATE, "_has_vote",                "_handle_next_vote",                "vote"),
+            TransitionSpec(Role.LEADER,    Role.FOLLOWER,  "_has_append_entries",      "_handle_next_append_entries",      "append_entries"),
+            TransitionSpec(Role.LEADER,    Role.LEADER,    "_has_vote_request",        "_ignore_vote_request",             "ignore_vote_request"),
+            TransitionSpec(Role.LEADER,    Role.LEADER,    "_has_vote",                "_ignore_vote",                     "ignore_vote"),
+            TransitionSpec(Role.LEADER,    Role.LEADER,    "_time_for_heartbeat",      "_send_heartbeat",                  "heartbeat"),
+        ]
+        return [self._make_transition(spec) for spec in specs]
+
+    def _make_transition(self, spec: TransitionSpec) -> fsm.Transition:
+        return fsm.Transition(
+            from_state=spec.from_state,
+            to_state=spec.to_state,
+            guard=lambda ctx, user, name=spec.guard_name: getattr(user, name)(),
+            action=lambda ctx, user, name=spec.action_name: getattr(user, name)(),
+            label=spec.label,
         )

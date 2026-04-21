@@ -24,6 +24,35 @@ Ejemplo Python:
 PYTHONPATH=python/src:../rxnet/python python3 python/examples/kv_cluster.py
 ```
 
+Shell interactiva Python genérica:
+
+```bash
+PYTHONPATH=python/src:../rxnet/python python3 python/tools/raftsh.py
+```
+
+Comandos principales de la shell genérica:
+
+- `status`: ver estado del clúster
+- `leader`: ver líder actual
+- `tick [N] [MS]`: avanzar la simulación
+- `autotick [MS]`: configure periodic shell-driven ticking in milliseconds; default is `300`, and `0` disables it. Internally the shell advances the cluster in smaller stable tick quanta.
+- `stop NODE`, `start NODE`, `restart NODE`: inyectar fallos y recuperación
+- `events [NODE ...]`: ver telemetría reciente
+
+Shell del ejemplo KV:
+
+```bash
+PYTHONPATH=python/src:../rxnet/python python3 python/examples/kv_shell.py
+```
+
+Comandos adicionales del ejemplo KV:
+
+- `set KEY VALUE`
+- `get KEY [NODE]`
+- `delete KEY`
+
+`add_node` no está implementado todavía porque requiere reconfiguración de membresía Raft.
+
 Ejemplo C:
 
 ```bash

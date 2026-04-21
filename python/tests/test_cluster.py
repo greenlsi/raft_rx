@@ -5,6 +5,11 @@ from pathlib import Path
 from raft_rx import Command, ManualClock, NodeConfig, RaftCluster
 from raft_rx.cluster import ClusterNodePaths
 
+try:
+    from python.examples.kv_app import KVApp
+except ImportError:
+    from examples.kv_app import KVApp
+
 
 def make_cluster(tmp_path: Path) -> RaftCluster:
     cluster = RaftCluster(clock=ManualClock())
@@ -16,9 +21,9 @@ def make_cluster(tmp_path: Path) -> RaftCluster:
             NodeConfig(node_id=node_id, peers=peers, election_timeout_ms=timeouts[node_id]),
             ClusterNodePaths(
                 storage_dir=tmp_path / "storage",
-                kv_path=tmp_path / "kv" / f"{node_id}.json",
                 telemetry_path=tmp_path / "telemetry" / f"{node_id}.jsonl",
             ),
+            application=KVApp(tmp_path / "kv" / f"{node_id}.json"),
         )
     return cluster
 
@@ -35,7 +40,7 @@ def test_election_and_replication(tmp_path: Path) -> None:
     cluster.run(80, advance_ms=10)
 
     for node in cluster.nodes.values():
-        assert node.get("alpha") == "1"
+        assert node.application.get("alpha") == "1"
         assert node.commit_index >= 1
 
 
@@ -50,5 +55,26 @@ def test_restart_recovers_persisted_state(tmp_path: Path) -> None:
 
     restarted = make_cluster(tmp_path)
     for node in restarted.nodes.values():
-        assert node.get("beta") == "2"
+        assert node.application.get("beta") == "2"
         assert len(node.log) >= 1
+
+
+def test_stop_and_restart_node_recovers_state(tmp_path: Path) -> None:
+    cluster = make_cluster(tmp_path)
+    cluster.run(80, advance_ms=10)
+
+    leader = cluster.leader()
+    assert leader is not None
+    leader.submit_command(Command(op="set", key="gamma", value="3"))
+    cluster.run(80, advance_ms=10)
+
+    cluster.stop_node("n2")
+    assert cluster.nodes["n2"].running is False
+    assert cluster.nodes["n2"].role.name == "FOLLOWER"
+
+    cluster.run(30, advance_ms=10)
+    cluster.start_node("n2")
+    cluster.run(40, advance_ms=10)
+
+    assert cluster.nodes["n2"].application.get("gamma") == "3"
+    assert cluster.nodes["n2"].commit_index >= 1

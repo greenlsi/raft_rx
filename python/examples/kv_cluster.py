@@ -5,6 +5,11 @@ from pathlib import Path
 from raft_rx import Command, ManualClock, NodeConfig, RaftCluster
 from raft_rx.cluster import ClusterNodePaths
 
+try:
+    from .kv_app import KVApp
+except ImportError:
+    from kv_app import KVApp
+
 
 def build_cluster(root: Path) -> RaftCluster:
     cluster = RaftCluster(clock=ManualClock())
@@ -16,9 +21,9 @@ def build_cluster(root: Path) -> RaftCluster:
             NodeConfig(node_id=node_id, peers=peers, election_timeout_ms=timeouts[node_id]),
             ClusterNodePaths(
                 storage_dir=root / "storage",
-                kv_path=root / "kv" / f"{node_id}.json",
                 telemetry_path=root / "telemetry" / f"{node_id}.jsonl",
             ),
+            application=KVApp(root / "kv" / f"{node_id}.json"),
         )
     return cluster
 
@@ -39,7 +44,8 @@ def main() -> None:
 
     for summary in cluster.summaries():
         node = cluster.nodes[str(summary["node_id"])]
-        print(summary, node.get("color"), node.get("mode"))
+        kv = node.application
+        print(summary, kv.get("color"), kv.get("mode"))
 
 
 if __name__ == "__main__":
