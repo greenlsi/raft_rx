@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
-from raft_rx.demo import DemoNode, _http_json
+from raft_rx_demo.demo import DemoNode, _http_json
 
 
 def test_demo_single_node_set_commits_and_reads_back(tmp_path: Path) -> None:

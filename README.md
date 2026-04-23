@@ -68,6 +68,26 @@ Comandos adicionales del ejemplo KV:
 
 La shell estándar es genérica. `set`, `get` y `delete` se registran desde el ejemplo KV y no forman parte del núcleo de la shell.
 
+Demo Python independiente (aplicación separada que consume `raft-rx`):
+
+```bash
+uv run --project python/examples/demo_app raft-rx-demo --bind 127.0.0.1:7400
+uv run --project python/examples/demo_app raft-rx-demo --join 127.0.0.1:7400 --bind 127.0.0.1:7402
+```
+
+Tests de la demo independiente:
+
+```bash
+uv run --project python/examples/demo_app --extra dev pytest -q
+```
+
+Empaquetado de la demo independiente:
+
+```bash
+cd python/examples/demo_app
+uv build
+```
+
 Ejemplo C:
 
 ```bash

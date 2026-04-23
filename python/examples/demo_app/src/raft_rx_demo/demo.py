@@ -16,10 +16,10 @@ from typing import Any
 
 from rxnet import fsm
 
-from .clock import SystemClock
-from .messages import Command, Message
-from .node import NodeConfig, RaftNode, Role
-from .storage import JsonFileStorage
+from raft_rx.clock import SystemClock
+from raft_rx.messages import Command, Message
+from raft_rx.node import NodeConfig, RaftNode, Role
+from raft_rx.storage import JsonFileStorage
 
 
 class DemoKVApp:
