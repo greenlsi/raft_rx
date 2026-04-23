@@ -61,7 +61,7 @@ def register_kv_commands(shell: RaftShell) -> None:
 
 def main(argv: list[str]) -> int:
     root = Path(argv[1]) if len(argv) > 1 else Path("var/python-kv-shell")
-    cluster = build_cluster(root)
+    cluster = build_cluster(root, trace_enabled=True)
     cluster.run(40, advance_ms=10)
     shell = RaftShell(cluster, root)
     register_kv_commands(shell)

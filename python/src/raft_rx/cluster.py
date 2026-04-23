@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from rxnet import fsm
+from rxnet.trace import Tracer
 
 from .application import RaftApplication
 from .clock import Clock, ManualClock
@@ -21,12 +23,28 @@ class ClusterNodePaths:
 
 
 class RaftCluster:
-    def __init__(self, clock: Clock | None = None, transport: MemoryTransport | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        transport: MemoryTransport | None = None,
+        *,
+        application_factory: Callable[[str], RaftApplication] | None = None,
+        paths_factory: Callable[[str], ClusterNodePaths] | None = None,
+        trace_enabled: bool = False,
+        trace_max_events: int = 8192,
+        trace_phases: bool = True,
+    ) -> None:
         self.clock = clock or ManualClock()
         self.transport = transport or MemoryTransport()
         self.runtime = fsm.Runtime()
         self.nodes: dict[str, RaftNode] = {}
         self.paths: dict[str, ClusterNodePaths] = {}
+        self.application_factory = application_factory
+        self.paths_factory = paths_factory
+        self.trace_enabled = trace_enabled
+        self.trace_max_events = trace_max_events
+        self.trace_phases = trace_phases
+        self.tracer = Tracer(max_events=trace_max_events, phases=trace_phases) if trace_enabled else None
 
     def add_node(
         self,
@@ -46,12 +64,71 @@ class RaftCluster:
             storage=JsonFileStorage(paths.storage_dir, config.node_id),
             application=application,
             telemetry=telemetry,
+            trace_event=self.emit_trace,
         )
         self.nodes[config.node_id] = node
         self.paths[config.node_id] = paths
         self.runtime.add_machine(node.machine)
-        self.runtime.build()
+        self.runtime.add_machine(node.compaction_machine)
+        self.runtime.add_machine(node.membership_machine)
+        self._refresh_trace_attachment()
         return node
+
+    def provision_node(
+        self,
+        node_id: str,
+        *,
+        members: list[str],
+        running: bool = False,
+        election_timeout_ms: int = 450,
+    ) -> RaftNode:
+        if node_id in self.nodes:
+            return self.nodes[node_id]
+        if self.application_factory is None or self.paths_factory is None:
+            raise RuntimeError("cluster cannot provision nodes without factories")
+        paths = self.paths_factory(node_id)
+        node = self.add_node(
+            NodeConfig(
+                node_id=node_id,
+                peers=[member for member in members if member != node_id],
+                election_timeout_ms=election_timeout_ms,
+            ),
+            paths,
+            application=self.application_factory(node_id),
+        )
+        node.config_state = node.config_state.stable(members)
+        node._refresh_membership_state()
+        node.persist_dirty = True
+        if not running:
+            node.stop()
+        return node
+
+    def emit_trace(self, label: str, value: int = 0) -> None:
+        if self.tracer is None:
+            return
+        self.tracer.user(label, value)
+
+    def export_trace(self, path: str | Path) -> bool:
+        if self.tracer is None:
+            return False
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.tracer.export(str(path))
+        return True
+
+    def report_trace(self, path: str | Path) -> bool:
+        if self.tracer is None:
+            return False
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.tracer.report(str(path))
+        return True
+
+    def serve_trace(self, host: str = "0.0.0.0", port: int = 7777) -> bool:
+        if self.tracer is None:
+            return False
+        self.tracer.serve(host=host, port=port)
+        return True
 
     def tick(self, advance_ms: int = 10) -> None:
         if isinstance(self.clock, ManualClock):
@@ -88,3 +165,9 @@ class RaftCluster:
 
     def node_ids(self) -> list[str]:
         return list(self.nodes.keys())
+
+    def _refresh_trace_attachment(self) -> None:
+        self.runtime.build()
+        if self.tracer is None:
+            return
+        self.tracer.attach(self.runtime)

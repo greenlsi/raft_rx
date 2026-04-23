@@ -3,7 +3,12 @@ name = "raft-rx"
 version = "0.1.0"
 description = "Raft over rxnet for Python"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "rxnet",
+]
+
+[project.scripts]
+raft-rx-demo = "raft_rx.demo:main"
 
 [project.optional-dependencies]
 dev = [
@@ -12,6 +17,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+rxnet = { path = "../../rxnet/python", editable = true }
 
 [build-system]
 requires = ["hatchling"]

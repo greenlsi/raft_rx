@@ -1,6 +1,7 @@
 from .application import RaftApplication
 from .clock import ManualClock, SystemClock
 from .cluster import RaftCluster
+from .configuration import ClusterConfiguration
 from .messages import Command, LogEntry, Message, MessageKind
 from .node import NodeConfig, RaftNode, Role
 from .shell import RaftShell
@@ -10,6 +11,7 @@ from .transport import MemoryTransport
 
 __all__ = [
     "Command",
+    "ClusterConfiguration",
     "JsonFileStorage",
     "JsonlTelemetrySink",
     "LogEntry",

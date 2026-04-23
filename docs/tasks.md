@@ -32,6 +32,8 @@
 - [x] Crear ejemplo ejecutable de base de datos distribuida.
 - [x] Crear shell externa para operación e inspección del clúster.
 - [x] Añadir tests de elección, replicación y recuperación.
+- [x] Implementar configuración estable/joint del clúster y FSM secundaria de membresía.
+- [x] Exponer reconfiguración en shell con `members`, `addnode` y `rmnode`.
 
 ## C
 
@@ -44,6 +46,7 @@
 - [x] Implementar nodo Raft sobre `rxnet/fsm.h`.
 - [x] Crear ejemplo de clúster de 3 nodos.
 - [x] Añadir tests de elección, replicación y reinicio.
+- [x] Portar reconfiguración `joint consensus` a la librería C.
 
 ## Verificación
 

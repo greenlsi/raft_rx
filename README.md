@@ -21,13 +21,24 @@ make test
 Ejemplo Python:
 
 ```bash
-PYTHONPATH=python/src:../rxnet/python python3 python/examples/kv_cluster.py
+uv run --project python python/examples/kv_cluster.py
 ```
+
+Ejemplo Python de reconfiguración con una sola traza `rxnet` continua:
+
+```bash
+uv run --project python python/examples/kv_reconfigure_trace.py
+```
+
+Genera:
+
+- `python/var/python-reconfigure-trace/trace.bin`
+- `python/var/python-reconfigure-trace/trace.html`
 
 Shell interactiva Python genérica:
 
 ```bash
-PYTHONPATH=python/src:../rxnet/python python3 python/tools/raftsh.py
+uv run --project python python/tools/raftsh.py
 ```
 
 Comandos principales de la shell genérica:
@@ -35,14 +46,18 @@ Comandos principales de la shell genérica:
 - `status`: ver estado del clúster
 - `leader`: ver líder actual
 - `tick [N] [MS]`: avanzar la simulación
-- `autotick [MS]`: configure periodic shell-driven ticking in milliseconds; default is `300`, and `0` disables it. Internally the shell advances the cluster in smaller stable tick quanta.
+- `autotick [MS]`: configurar ticking periódico dirigido por la shell en milisegundos; el valor por defecto es `300` y `0` lo desactiva. Internamente la shell avanza el clúster en quanta menores y estables.
 - `stop NODE`, `start NODE`, `restart NODE`: inyectar fallos y recuperación
+- `members [NODE]`: ver la configuración estable o joint del clúster
+- `addnode NODE`, `rmnode NODE`: pedir una reconfiguración Raft por joint consensus
+- `log NODE`: inspeccionar el log local y ver qué entradas están `COMMITTED` o `UNCOMMITTED`
+- `maxlog [ENTRIES]`: consultar o cambiar, por consenso, el umbral de compactación
 - `events [NODE ...]`: ver telemetría reciente
 
 Shell del ejemplo KV:
 
 ```bash
-PYTHONPATH=python/src:../rxnet/python python3 python/examples/kv_shell.py
+uv run --project python python/examples/kv_shell.py
 ```
 
 Comandos adicionales del ejemplo KV:
@@ -51,7 +66,7 @@ Comandos adicionales del ejemplo KV:
 - `get KEY [NODE]`
 - `delete KEY`
 
-`add_node` no está implementado todavía porque requiere reconfiguración de membresía Raft.
+La shell estándar es genérica. `set`, `get` y `delete` se registran desde el ejemplo KV y no forman parte del núcleo de la shell.
 
 Ejemplo C:
 
@@ -60,8 +75,33 @@ make -C c build/raft_kv_cluster
 ./c/build/raft_kv_cluster
 ```
 
+La API C ya soporta reconfiguración consensuada con `raft_node_request_membership_change(...)`, persistencia de configuración estable/joint y quorum doble durante `joint consensus`.
+
+Ejemplo C trazado con `rxnet` + export de una sola `trace.bin` continua:
+
+```bash
+make -C c build/raft_kv_cluster_trace
+./c/build/raft_kv_cluster_trace
+```
+
+Genera:
+
+- `c/var/c-trace-example/trace.bin`
+
+Para abrir la traza:
+
+```bash
+python3 -m rxnet.tools.trace c/var/c-trace-example/trace.bin --report report.html --open
+```
+
 Artefacto de librería C:
 
 ```bash
 make -C c build/libraft_rx.a
+```
+
+Variante trazada:
+
+```bash
+make -C c build/libraft_rx_trace.a
 ```

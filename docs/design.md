@@ -10,13 +10,15 @@ La solución se organiza en cinco capas:
 4. `state_machine`: lógica de aplicación; en este proyecto, un almacén clave-valor.
 5. `telemetry`: emisión opcional de eventos estructurados para una shell externa.
 
-Las implementaciones C y Python comparten la misma semántica, aunque no el mismo layout interno.
+Las implementaciones C y Python comparten la misma semántica base, aunque no el mismo layout interno.
+La reconfiguración por `joint consensus` descrita en este documento está implementada en las referencias Python y C.
 
 ## Modelo de nodo
 
 Cada nodo mantiene:
 
 - `node_id`
+- `config_state`
 - `peers`
 - `current_term`
 - `voted_for`
@@ -37,6 +39,20 @@ La FSM `rxnet` modela el rol y los eventos principales de Raft:
 - `LEADER`
 
 El resto del estado vive en la estructura de usuario del nodo y se actualiza en callbacks de fase.
+
+Adicionalmente, la implementación Python modela dos FSM secundarias:
+
+- `CompactionFSM`: `IDLE -> SNAPSHOT_PENDING -> COMPACTING -> IDLE`
+- `MembershipFSM`: `STABLE -> JOINT_PENDING -> JOINT -> FINALIZING -> STABLE`
+
+La membresía ya no es una lista simple. Se representa como una configuración explícita:
+
+- `old_members`
+- `new_members | None`
+- `configuration_index`
+
+Cuando `new_members is None`, la configuración es estable.
+Cuando `new_members` existe, el nodo está en `joint consensus`.
 
 La tabla principal de transición es:
 
@@ -147,6 +163,38 @@ Los followers:
 - añaden las nuevas entradas válidas,
 - actualizan `commit_index` según `leader_commit`.
 
+### Reconfiguración de clúster
+
+Los cambios de membresía no se aplican con una sola entrada.
+Se modelan como dos entradas de log:
+
+- `cluster.enter_joint(C_new)`
+- `cluster.leave_joint(C_new)`
+
+La shell expone operaciones de alto nivel como `addnode` y `rmnode`, pero internamente el líder activa la `MembershipFSM`, que materializa esa secuencia.
+
+Durante `joint consensus`, el cálculo de commit exige doble mayoría:
+
+- mayoría sobre `old_members`
+- mayoría sobre `new_members`
+
+La finalización de la transición solo ocurre cuando el líder considera que los miembros de `C_new` están suficientemente puestos al día.
+
+### Alcance actual de reconfiguración
+
+La implementación actual cubre:
+
+- representación persistente de configuración estable o joint,
+- quorum doble para commit en modo joint,
+- transición en dos entradas de log,
+- shell operativa para `members`, `addnode` y `rmnode`,
+- provisión local de nodos nuevos en el clúster de simulación.
+
+Todavía no cubre:
+
+- `InstallSnapshot` para incorporación acelerada de nodos rezagados,
+- restricciones adicionales de elegibilidad de líder durante reconfiguración.
+
 ## Persistencia
 
 Se usan dos abstracciones:
@@ -159,6 +207,14 @@ En host, la persistencia de referencia se implementa con ficheros por nodo:
 - `meta.json` o `meta.txt`
 - `log.jsonl` o `log.txt`
 - `kv.json` o `kv.txt`
+
+En `meta.json` se persisten también:
+
+- `old_members`
+- `new_members`
+- `configuration_index`
+- `compaction_threshold`
+- metadatos de snapshot
 
 Las escrituras de metadatos y de la máquina de estados se hacen mediante fichero temporal y reemplazo atómico. El log puede reescribirse entero en esta primera versión para simplificar robustez y trazabilidad.
 

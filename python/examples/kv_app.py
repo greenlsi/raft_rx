@@ -38,3 +38,10 @@ class KVApp:
 
     def get(self, key: str) -> str | None:
         return self.data.get(key)
+
+    def snapshot(self) -> object:
+        return dict(self.data)
+
+    def restore_snapshot(self, snapshot: object) -> None:
+        self.data = {str(k): str(v) for k, v in dict(snapshot).items()}
+        self.save()

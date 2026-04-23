@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .messages import Command
 from .cluster import RaftCluster
 
 ShellHandler = Callable[["RaftShell", list[str]], None]
@@ -71,9 +72,11 @@ class RaftShell(cmd.Cmd):
         for summary in summaries:
             print(
                 f"{summary['node_id']:>3} running={str(summary['running']).lower():<5} "
-                f"role={summary['role']:<9} term={summary['term']:<3} "
+                f"role={summary['role']:<9} cfg={summary['membership_mode']:<6} "
+                f"cfg_idx={summary['configuration_index']:<3} term={summary['term']:<3} "
                 f"leader={summary['leader_id']!s:<4} "
-                f"log={summary['log_len']:<3} commit={summary['commit_index']:<3} "
+                f"log={summary['log_len']:<3} snapshot={summary['snapshot_index']:<3} "
+                f"maxlog={summary['compaction_threshold']:<3} commit={summary['commit_index']:<3} "
                 f"applied={summary['last_applied']:<3}"
             )
 
@@ -137,6 +140,37 @@ class RaftShell(cmd.Cmd):
         for node_id in node_ids:
             self._print_events(node_id)
 
+    def do_members(self, arg: str) -> None:
+        parts = shlex.split(arg)
+        with self.cluster_locked() as cluster:
+            if len(parts) == 1:
+                node = cluster.nodes.get(parts[0])
+                if node is None:
+                    print(f"unknown node: {parts[0]}")
+                    return
+                print(
+                    json.dumps(
+                        {
+                            "mode": node.config_state.mode(),
+                            "old_members": list(node.config_state.old_members),
+                            "new_members": list(node.config_state.new_members) if node.config_state.new_members is not None else None,
+                            "index": node.config_state.index,
+                        },
+                        indent=2,
+                    )
+                )
+                return
+            view = {
+                node_id: {
+                    "mode": node.config_state.mode(),
+                    "old_members": list(node.config_state.old_members),
+                    "new_members": list(node.config_state.new_members) if node.config_state.new_members is not None else None,
+                    "index": node.config_state.index,
+                }
+                for node_id, node in cluster.nodes.items()
+            }
+        print(json.dumps(view, indent=2, sort_keys=True))
+
     def do_log(self, arg: str) -> None:
         parts = shlex.split(arg)
         if len(parts) != 1:
@@ -150,7 +184,8 @@ class RaftShell(cmd.Cmd):
                 return
             print(
                 f"{node_id}: term={node.current_term} role={node.role.name} "
-                f"log_len={len(node.log)} commit_index={node.commit_index} last_applied={node.last_applied}"
+                f"log_len={len(node.log)} snapshot_index={node.snapshot_last_included_index} "
+                f"commit_index={node.commit_index} last_applied={node.last_applied}"
             )
             if not node.log:
                 print("(empty log)")
@@ -167,9 +202,86 @@ class RaftShell(cmd.Cmd):
         with self.cluster_locked() as cluster:
             print(json.dumps(cluster.summaries(), indent=2))
 
-    def do_add_node(self, arg: str) -> None:
-        del arg
-        print("unsupported: add-node requires Raft membership reconfiguration (joint consensus)")
+    def do_trace(self, arg: str) -> None:
+        parts = shlex.split(arg)
+        path = Path(parts[0]) if parts else self.root / "trace.bin"
+        with self.cluster_locked() as cluster:
+            if not cluster.export_trace(path):
+                print("trace disabled")
+                return
+        print(path)
+
+    def do_trace_report(self, arg: str) -> None:
+        parts = shlex.split(arg)
+        path = Path(parts[0]) if parts else self.root / "trace.html"
+        with self.cluster_locked() as cluster:
+            if not cluster.report_trace(path):
+                print("trace disabled")
+                return
+        print(path)
+
+    def do_maxlog(self, arg: str) -> None:
+        parts = shlex.split(arg)
+        if not parts:
+            with self.cluster_locked() as cluster:
+                values = {node_id: node.compaction_threshold for node_id, node in cluster.nodes.items()}
+            print(json.dumps(values, indent=2, sort_keys=True))
+            return
+        if len(parts) != 1:
+            print("usage: maxlog [ENTRIES]")
+            return
+        threshold = int(parts[0])
+        if threshold <= 0:
+            print("maxlog must be > 0")
+            return
+        with self.cluster_locked() as cluster:
+            leader = cluster.leader()
+            if leader is None:
+                print("no leader")
+                return
+            leader.submit_command(Command(op="cluster.set_maxlog", key="maxlog", value=str(threshold)))
+            print(f"queued maxlog={threshold} on {leader.node_id}")
+
+    def do_addnode(self, arg: str) -> None:
+        parts = shlex.split(arg)
+        if len(parts) != 1:
+            print("usage: addnode NODE")
+            return
+        node_id = parts[0]
+        with self.cluster_locked() as cluster:
+            leader = cluster.leader()
+            if leader is None:
+                print("no leader")
+                return
+            members = list(leader.config_state.all_members())
+            if node_id in members:
+                print(f"node already exists: {node_id}")
+                return
+            try:
+                cluster.provision_node(node_id, members=[*members, node_id], running=False)
+            except RuntimeError as exc:
+                print(str(exc))
+                return
+            leader.request_membership_change([*members, node_id])
+            print(f"requested addnode={node_id} on {leader.node_id}")
+
+    def do_rmnode(self, arg: str) -> None:
+        parts = shlex.split(arg)
+        if len(parts) != 1:
+            print("usage: rmnode NODE")
+            return
+        node_id = parts[0]
+        with self.cluster_locked() as cluster:
+            leader = cluster.leader()
+            if leader is None:
+                print("no leader")
+                return
+            members = list(leader.config_state.all_members())
+            if node_id not in members:
+                print(f"unknown node: {node_id}")
+                return
+            leader.request_membership_change([member for member in members if member != node_id])
+            print(f"requested rmnode={node_id} on {leader.node_id}")
 
     def do_help(self, arg: str) -> None:
         target = arg.strip()

@@ -9,3 +9,9 @@ class NoopApp:
 
     def reload(self) -> None:
         return
+
+    def snapshot(self) -> object:
+        return {}
+
+    def restore_snapshot(self, snapshot: object) -> None:
+        del snapshot

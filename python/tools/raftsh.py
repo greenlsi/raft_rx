@@ -9,7 +9,7 @@ from noop_app import NoopApp
 
 
 def build_cluster(root: Path) -> RaftCluster:
-    cluster = RaftCluster(clock=ManualClock())
+    cluster = RaftCluster(clock=ManualClock(), trace_enabled=True)
     node_ids = ["n1", "n2", "n3"]
     timeouts = {"n1": 150, "n2": 250, "n3": 350}
     for node_id in node_ids:

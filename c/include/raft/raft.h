@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "rxnet/fsm.h"
+#include "rxnet/trace.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,13 @@ typedef enum {
 } raft_role_t;
 
 typedef enum {
+    RAFT_MEMBERSHIP_STABLE = 0,
+    RAFT_MEMBERSHIP_JOINT_PENDING = 1,
+    RAFT_MEMBERSHIP_JOINT = 2,
+    RAFT_MEMBERSHIP_FINALIZING = 3,
+} raft_membership_state_t;
+
+typedef enum {
     RAFT_MSG_REQUEST_VOTE = 0,
     RAFT_MSG_REQUEST_VOTE_RESPONSE = 1,
     RAFT_MSG_APPEND_ENTRIES = 2,
@@ -32,7 +40,7 @@ typedef enum {
 } raft_message_kind_t;
 
 typedef struct {
-    char op[16];
+    char op[32];
     char key[RAFT_MAX_KEY];
     char value[RAFT_MAX_VALUE];
 } raft_command_t;
@@ -86,9 +94,19 @@ typedef struct {
     char node_id[RAFT_MAX_ID];
     char peers[RAFT_MAX_PEERS][RAFT_MAX_ID];
     size_t peer_count;
+    char initial_members[RAFT_MAX_NODES][RAFT_MAX_ID];
+    size_t initial_member_count;
     int election_timeout_ms;
     int heartbeat_interval_ms;
 } raft_node_config_t;
+
+typedef struct {
+    char old_members[RAFT_MAX_NODES][RAFT_MAX_ID];
+    size_t old_count;
+    char new_members[RAFT_MAX_NODES][RAFT_MAX_ID];
+    size_t new_count;
+    int index;
+} raft_cluster_configuration_t;
 
 struct raft_node {
     raft_node_config_t config;
@@ -105,6 +123,16 @@ struct raft_node {
     int commit_index;
     int last_applied;
     char leader_id[RAFT_MAX_ID];
+    int compaction_threshold;
+    int running;
+
+    raft_cluster_configuration_t config_state;
+    raft_membership_state_t membership_state;
+    char requested_membership[RAFT_MAX_NODES][RAFT_MAX_ID];
+    size_t requested_membership_count;
+    int requested_membership_pending;
+    int joint_config_index;
+    int final_config_index;
 
     char votes_received[RAFT_MAX_PEERS + 1][RAFT_MAX_ID];
     size_t vote_count;
@@ -134,6 +162,10 @@ typedef struct {
     raft_memory_transport_t transport;
     raft_node_t nodes[RAFT_MAX_NODES];
     size_t node_count;
+#ifdef RX_TRACE_ENABLE
+    rx_trace_buf_t *trace;
+    int trace_labels_registered;
+#endif
 } raft_cluster_t;
 
 void raft_memory_transport_init(raft_memory_transport_t *transport);
@@ -155,7 +187,12 @@ raft_node_t *raft_cluster_add_node(raft_cluster_t *cluster, const raft_node_conf
 int raft_cluster_tick(raft_cluster_t *cluster, int advance_ms);
 raft_node_t *raft_cluster_leader(raft_cluster_t *cluster);
 
+#ifdef RX_TRACE_ENABLE
+int raft_cluster_attach_trace(raft_cluster_t *cluster, rx_trace_buf_t *trace);
+#endif
+
 int raft_node_submit_command(raft_node_t *node, const raft_command_t *command);
+int raft_node_request_membership_change(raft_node_t *node, const char members[][RAFT_MAX_ID], size_t member_count);
 const char *raft_node_get(raft_node_t *node, const char *key);
 
 #ifdef __cplusplus
