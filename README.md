@@ -95,6 +95,13 @@ make -C c build/raft_kv_cluster
 ./c/build/raft_kv_cluster
 ```
 
+Demo app C independiente (aplicación separada que consume `raft_rx`):
+
+```bash
+make -C c/examples/demo_app
+./c/examples/demo_app/build/raft_kv_demo_app
+```
+
 La API C ya soporta reconfiguración consensuada con `raft_node_request_membership_change(...)`, persistencia de configuración estable/joint y quorum doble durante `joint consensus`.
 
 Ejemplo C trazado con `rxnet` + export de una sola `trace.bin` continua:

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "rxnet/fsm.h"
 #include "rxnet/trace.h"
@@ -17,7 +18,10 @@ extern "C" {
 #define RAFT_MAX_BATCH 16
 #define RAFT_MAX_KEY 64
 #define RAFT_MAX_VALUE 128
-#define RAFT_MAX_KV 128
+
+#ifndef RAFT_MAX_SNAPSHOT_SIZE
+#define RAFT_MAX_SNAPSHOT_SIZE 4096
+#endif
 
 typedef enum {
     RAFT_ROLE_FOLLOWER = 0,
@@ -68,15 +72,20 @@ typedef struct {
     size_t entry_count;
 } raft_message_t;
 
+/* Application callbacks — implement these for your state machine. */
 typedef struct {
-    char key[RAFT_MAX_KEY];
-    char value[RAFT_MAX_VALUE];
-    int used;
-} raft_kv_pair_t;
+    void (*apply)(void *user, const raft_command_t *command);
+    void (*reload)(void *user);
+    size_t (*snapshot)(void *user, void *buf, size_t buf_size);
+    void (*restore_snapshot)(void *user, const void *buf, size_t size);
+    void *user;
+} raft_application_t;
 
 typedef struct {
     char node_id[RAFT_MAX_ID];
     char root_dir[256];
+    uint8_t snapshot_buf[RAFT_MAX_SNAPSHOT_SIZE];
+    size_t snapshot_buf_size;
 } raft_file_storage_t;
 
 typedef struct {
@@ -88,7 +97,8 @@ typedef struct {
     size_t node_count;
 } raft_memory_transport_t;
 
-typedef struct raft_node raft_node_t;
+typedef struct raft_node    raft_node_t;
+typedef struct raft_cluster raft_cluster_t;
 
 typedef struct {
     char node_id[RAFT_MAX_ID];
@@ -109,10 +119,12 @@ typedef struct {
 } raft_cluster_configuration_t;
 
 struct raft_node {
+    raft_cluster_t    *cluster;
     raft_node_config_t config;
     long *clock_ms;
     raft_memory_transport_t *transport;
     raft_file_storage_t storage;
+    raft_application_t application;
 
     rx_fsm_machine machine;
 
@@ -120,6 +132,8 @@ struct raft_node {
     char voted_for[RAFT_MAX_ID];
     raft_log_entry_t log[RAFT_MAX_LOG];
     size_t log_count;
+    int snapshot_last_included_index;
+    int snapshot_last_included_term;
     int commit_index;
     int last_applied;
     char leader_id[RAFT_MAX_ID];
@@ -148,16 +162,14 @@ struct raft_node {
     raft_message_t pending_votes[RAFT_MAX_QUEUE];
     size_t pending_vote_count;
 
-    raft_kv_pair_t kv[RAFT_MAX_KV];
-    size_t kv_count;
-
     int persist_dirty;
     long election_deadline_ms;
     long heartbeat_deadline_ms;
 };
 
-typedef struct {
-    rx_fsm_runtime runtime;
+struct raft_cluster {
+    rx_fsm_runtime *runtime;
+    int realtime_clock;
     long clock_ms;
     raft_memory_transport_t transport;
     raft_node_t nodes[RAFT_MAX_NODES];
@@ -166,8 +178,9 @@ typedef struct {
     rx_trace_buf_t *trace;
     int trace_labels_registered;
 #endif
-} raft_cluster_t;
+};
 
+/* Transport */
 void raft_memory_transport_init(raft_memory_transport_t *transport);
 int raft_memory_transport_register_node(raft_memory_transport_t *transport, const char *node_id);
 int raft_memory_transport_send(raft_memory_transport_t *transport, const raft_message_t *message);
@@ -178,12 +191,16 @@ int raft_memory_transport_submit_client_command(raft_memory_transport_t *transpo
 size_t raft_memory_transport_recv_client_commands(raft_memory_transport_t *transport, const char *node_id,
                                                   raft_command_t *out, size_t capacity);
 
+/* Storage */
 void raft_file_storage_init(raft_file_storage_t *storage, const char *root_dir, const char *node_id);
 
-int raft_cluster_init(raft_cluster_t *cluster);
+/* Cluster */
+int raft_cluster_init(raft_cluster_t *cluster, rx_fsm_runtime *runtime);
 void raft_cluster_destroy(raft_cluster_t *cluster);
+void raft_cluster_enable_realtime_clock(raft_cluster_t *cluster);
 raft_node_t *raft_cluster_add_node(raft_cluster_t *cluster, const raft_node_config_t *config,
-                                   const char *root_dir);
+                                   const char *root_dir, const raft_application_t *application,
+                                   long period_us);
 int raft_cluster_tick(raft_cluster_t *cluster, int advance_ms);
 raft_node_t *raft_cluster_leader(raft_cluster_t *cluster);
 
@@ -191,9 +208,10 @@ raft_node_t *raft_cluster_leader(raft_cluster_t *cluster);
 int raft_cluster_attach_trace(raft_cluster_t *cluster, rx_trace_buf_t *trace);
 #endif
 
+/* Node */
 int raft_node_submit_command(raft_node_t *node, const raft_command_t *command);
-int raft_node_request_membership_change(raft_node_t *node, const char members[][RAFT_MAX_ID], size_t member_count);
-const char *raft_node_get(raft_node_t *node, const char *key);
+int raft_node_request_membership_change(raft_node_t *node, const char members[][RAFT_MAX_ID],
+                                        size_t member_count);
 
 #ifdef __cplusplus
 }

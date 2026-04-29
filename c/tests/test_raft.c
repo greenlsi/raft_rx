@@ -1,4 +1,6 @@
 #include "raft/raft.h"
+#include "raft/raft_kv_app.h"
+#include "rxnet/fsm.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -16,11 +18,11 @@ static raft_node_config_t make_config(const char *node_id, const char *peer_a, c
     strncpy(config.peers[1], peer_b, RAFT_MAX_ID - 1);
     config.peer_count = 2;
     strncpy(config.initial_members[0], node_id, RAFT_MAX_ID - 1);
-    strncpy(config.initial_members[1], peer_a, RAFT_MAX_ID - 1);
-    strncpy(config.initial_members[2], peer_b, RAFT_MAX_ID - 1);
-    config.initial_member_count = 3;
-    config.election_timeout_ms = election_timeout_ms;
-    config.heartbeat_interval_ms = 50;
+    strncpy(config.initial_members[1], peer_a,  RAFT_MAX_ID - 1);
+    strncpy(config.initial_members[2], peer_b,  RAFT_MAX_ID - 1);
+    config.initial_member_count   = 3;
+    config.election_timeout_ms    = election_timeout_ms;
+    config.heartbeat_interval_ms  = 50;
     return config;
 }
 
@@ -36,90 +38,112 @@ static raft_node_config_t make_config4(const char *node_id, const char *peer_a, 
     strncpy(config.initial_members[0], peer_a, RAFT_MAX_ID - 1);
     strncpy(config.initial_members[1], peer_b, RAFT_MAX_ID - 1);
     strncpy(config.initial_members[2], peer_c, RAFT_MAX_ID - 1);
-    config.initial_member_count = 3;
-    config.election_timeout_ms = election_timeout_ms;
-    config.heartbeat_interval_ms = 50;
+    config.initial_member_count   = 3;
+    config.election_timeout_ms    = election_timeout_ms;
+    config.heartbeat_interval_ms  = 50;
     return config;
 }
 
-static void build_cluster(raft_cluster_t *cluster, const char *root) {
-    raft_node_config_t n1;
-    raft_node_config_t n2;
-    raft_node_config_t n3;
-    assert(raft_cluster_init(cluster) == 0);
-    n1 = make_config("n1", "n2", "n3", 150);
-    n2 = make_config("n2", "n1", "n3", 250);
-    n3 = make_config("n3", "n1", "n2", 350);
-    assert(raft_cluster_add_node(cluster, &n1, root) != NULL);
-    assert(raft_cluster_add_node(cluster, &n2, root) != NULL);
-    assert(raft_cluster_add_node(cluster, &n3, root) != NULL);
+/* Adds 3 initial nodes to cluster; kv[] must have room for at least 3 entries. */
+static void build_cluster(raft_cluster_t *cluster, rx_fsm_runtime *rt,
+                          const char *root, raft_kv_state_t kv[]) {
+    raft_node_config_t n1 = make_config("n1", "n2", "n3", 150);
+    raft_node_config_t n2 = make_config("n2", "n1", "n3", 250);
+    raft_node_config_t n3 = make_config("n3", "n1", "n2", 350);
+    raft_application_t a[3];
+    int i;
+
+    assert(rx_fsm_runtime_init(rt, RAFT_MAX_NODES) == 0);
+    assert(raft_cluster_init(cluster, rt) == 0);
+    for (i = 0; i < 3; ++i) {
+        raft_kv_state_init(&kv[i]);
+        a[i] = raft_kv_make_application(&kv[i]);
+    }
+    assert(raft_cluster_add_node(cluster, &n1, root, &a[0], 0) != NULL);
+    assert(raft_cluster_add_node(cluster, &n2, root, &a[1], 0) != NULL);
+    assert(raft_cluster_add_node(cluster, &n3, root, &a[2], 0) != NULL);
 }
 
 int main(void) {
     char root[] = "/tmp/raft-c-test-XXXXXX";
     raft_cluster_t *cluster;
     raft_cluster_t *restarted;
+    rx_fsm_runtime  rt1, rt2;
     raft_node_t *leader;
     raft_node_t *n4;
     raft_command_t command;
+    raft_kv_state_t kv1[RAFT_MAX_NODES];
+    raft_kv_state_t kv2[RAFT_MAX_NODES];
+    raft_application_t app_n4;
     size_t i;
     char add_members[4][RAFT_MAX_ID] = {"n1", "n2", "n3", "n4"};
     raft_node_config_t n4_config;
 
     assert(mkdtemp(root) != NULL);
-    cluster = calloc(1, sizeof(*cluster));
+    cluster   = calloc(1, sizeof(*cluster));
     restarted = calloc(1, sizeof(*restarted));
     assert(cluster != NULL);
     assert(restarted != NULL);
-    build_cluster(cluster, root);
 
-    for (i = 0; i < 80; ++i) {
+    build_cluster(cluster, &rt1, root, kv1);
+
+    for (i = 0; i < 80; ++i)
         assert(raft_cluster_tick(cluster, 10) == 0);
-    }
+
     leader = raft_cluster_leader(cluster);
     assert(leader != NULL);
     assert(strcmp(leader->config.node_id, "n1") == 0);
 
     memset(&command, 0, sizeof(command));
-    strcpy(command.op, "set");
-    strcpy(command.key, "alpha");
+    strcpy(command.op,    "set");
+    strcpy(command.key,   "alpha");
     strcpy(command.value, "1");
     assert(raft_node_submit_command(leader, &command) == 0);
 
-    for (i = 0; i < 80; ++i) {
+    for (i = 0; i < 80; ++i)
         assert(raft_cluster_tick(cluster, 10) == 0);
-    }
-    for (i = 0; i < cluster->node_count; ++i) {
-        assert(strcmp(raft_node_get(&cluster->nodes[i], "alpha"), "1") == 0);
-    }
+
+    for (i = 0; i < cluster->node_count; ++i)
+        assert(strcmp(raft_kv_get(&kv1[i], "alpha"), "1") == 0);
 
     n4_config = make_config4("n4", "n1", "n2", "n3", 450);
-    n4 = raft_cluster_add_node(cluster, &n4_config, root);
+    raft_kv_state_init(&kv1[3]);
+    app_n4 = raft_kv_make_application(&kv1[3]);
+    n4 = raft_cluster_add_node(cluster, &n4_config, root, &app_n4, 0);
     assert(n4 != NULL);
     assert(raft_node_request_membership_change(leader, add_members, 4) == 0);
 
-    for (i = 0; i < 160; ++i) {
+    for (i = 0; i < 160; ++i)
         assert(raft_cluster_tick(cluster, 10) == 0);
-    }
 
     for (i = 0; i < cluster->node_count; ++i) {
         raft_node_t *node = &cluster->nodes[i];
         assert(node->config_state.old_count == 4);
         assert(node->config_state.new_count == 0);
-        assert(strcmp(raft_node_get(node, "alpha"), "1") == 0);
+        assert(strcmp(raft_kv_get(&kv1[i], "alpha"), "1") == 0);
     }
 
     raft_cluster_destroy(cluster);
+    rx_fsm_runtime_free(&rt1);
 
-    build_cluster(restarted, root);
-    n4 = raft_cluster_add_node(restarted, &n4_config, root);
+    /* Restart: reload state from disk and verify persistence */
+    build_cluster(restarted, &rt2, root, kv2);
+    raft_kv_state_init(&kv2[3]);
+    app_n4 = raft_kv_make_application(&kv2[3]);
+    n4 = raft_cluster_add_node(restarted, &n4_config, root, &app_n4, 0);
     assert(n4 != NULL);
+
+    /* One tick lets each node apply committed entries from the restored log */
+    assert(raft_cluster_tick(restarted, 1) == 0);
+
     for (i = 0; i < restarted->node_count; ++i) {
-        assert(strcmp(raft_node_get(&restarted->nodes[i], "alpha"), "1") == 0);
+        assert(strcmp(raft_kv_get(&kv2[i], "alpha"), "1") == 0);
         assert(restarted->nodes[i].config_state.old_count == 4);
         assert(restarted->nodes[i].config_state.new_count == 0);
     }
+
     raft_cluster_destroy(restarted);
+    rx_fsm_runtime_free(&rt2);
     free(cluster);
     free(restarted);
     printf("ok\n");
