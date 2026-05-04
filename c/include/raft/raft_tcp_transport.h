@@ -34,17 +34,20 @@ extern "C" {
 #define RAFT_JOIN_PENDING   99
 
 typedef struct {
-    char node_id[RAFT_MAX_ID];
-    char host[256];
-    int  port;
-    int  forwarded;
-} raft_tcp_join_req_t;
-
-typedef struct {
     char id[RAFT_MAX_ID];
     char host[256];
     int  port;
 } raft_tcp_peer_t;
+
+typedef struct {
+    char node_id[RAFT_MAX_ID];
+    char host[256];
+    int  port;
+    int  forwarded;
+    int  cluster_join;
+    size_t member_count;
+    raft_tcp_peer_t members[RAFT_MAX_NODES];
+} raft_tcp_join_req_t;
 
 typedef struct {
     int  listen_port;
@@ -70,6 +73,7 @@ typedef struct {
     size_t         fwd_cmd_count;
 
     pthread_t       listener_thread;
+    int             listener_started;
     int             enabled;
     volatile int    shutdown;
 } raft_tcp_transport_t;
@@ -78,6 +82,8 @@ void             raft_tcp_transport_init      (raft_tcp_transport_t *tcp, int po
 void             raft_tcp_transport_add_peer  (raft_tcp_transport_t *tcp,
                                                const char *id, const char *host, int port);
 int              raft_tcp_transport_start     (raft_tcp_transport_t *tcp);
+int              raft_tcp_transport_listen    (raft_tcp_transport_t *tcp, int port);
+int              raft_tcp_transport_is_listening(const raft_tcp_transport_t *tcp);
 void             raft_tcp_transport_stop      (raft_tcp_transport_t *tcp);
 raft_transport_t raft_tcp_transport_make      (raft_tcp_transport_t *tcp);
 
@@ -89,6 +95,17 @@ int raft_tcp_transport_request_join(raft_tcp_transport_t *tcp,
                                      const char *my_id,
                                      const char *my_host, int my_port,
                                      const char *target_host, int target_port);
+int raft_tcp_transport_request_cluster_join(raft_tcp_transport_t *tcp,
+                                             const raft_tcp_peer_t *members,
+                                             size_t member_count,
+                                             const char *target_host,
+                                             int target_port);
+int raft_tcp_transport_send_cluster_join(raft_tcp_transport_t *tcp,
+                                          const raft_tcp_peer_t *members,
+                                          size_t member_count,
+                                          const char *target_host,
+                                          int target_port,
+                                          int forwarded);
 
 /*
  * Flood a join request to all configured peers (with forwarded=1 so they

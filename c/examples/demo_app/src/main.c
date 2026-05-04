@@ -53,6 +53,7 @@
 typedef struct {
     char node_id[RAFT_MAX_ID];
     int  port;
+    int  port_supplied;
     char host[256];
     char data_dir[256];
 
@@ -70,7 +71,7 @@ typedef struct {
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-        "usage: %s --id NAME --port PORT [--host HOST] [--data DIR]\n"
+        "usage: %s --id NAME [--port PORT] [--host HOST] [--data DIR]\n"
         "          [--member ID] ... [--peer ID=HOST:PORT] ...\n"
         "          [--join HOST:PORT]\n",
         argv0);
@@ -108,6 +109,7 @@ static node_args_t parse_args(int argc, char **argv) {
             strncpy(a.node_id, argv[++i], RAFT_MAX_ID - 1);
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             a.port = atoi(argv[++i]);
+            a.port_supplied = 1;
         } else if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
             strncpy(a.host, argv[++i], sizeof(a.host) - 1);
         } else if (strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
@@ -135,8 +137,12 @@ static node_args_t parse_args(int argc, char **argv) {
         }
     }
 
-    if (!a.node_id[0] || a.port <= 0) {
-        fprintf(stderr, "--id and --port are required\n");
+    if (!a.node_id[0]) {
+        fprintf(stderr, "--id is required\n");
+        usage(argv[0]);
+    }
+    if (a.join_port > 0 && (!a.port_supplied || a.port <= 0)) {
+        fprintf(stderr, "--join requires --port so peers can reach this node\n");
         usage(argv[0]);
     }
     return a;
@@ -170,7 +176,7 @@ static void setup(const node_args_t *a) {
     for (i = 0; i < a->peer_count; ++i)
         raft_tcp_transport_add_peer(&g_tcp, a->peer_ids[i],
                                     a->peer_hosts[i], a->peer_ports[i]);
-    if (raft_tcp_transport_start(&g_tcp) != 0) {
+    if (a->port_supplied && raft_tcp_transport_start(&g_tcp) != 0) {
         fprintf(stderr, "failed to listen on port %d\n", a->port);
         exit(1);
     }
@@ -241,7 +247,10 @@ int main(int argc, char **argv) {
         fputs("rx_coop_exec_add failed\n", stderr); exit(1);
     }
 
-    printf("[%s] listening on :%d  (type 'help')\n", args.node_id, args.port);
+    if (raft_tcp_transport_is_listening(&g_tcp))
+        printf("[%s] listening on :%d  (type 'help')\n", args.node_id, g_tcp.listen_port);
+    else
+        printf("[%s] not listening  (use 'port PORT'; type 'help')\n", args.node_id);
 
     rx_coop_exec_run(&g_ce);
 

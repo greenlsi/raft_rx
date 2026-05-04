@@ -23,6 +23,9 @@ typedef struct {
     int                   last_term;
     char                  last_voted_for[RAFT_MAX_ID];
     int                   last_vote_count;
+    int                   rejoin_pending;
+    char                  rejoin_host[256];
+    int                   rejoin_port;
     raft_tcp_join_req_t   pending_joins[RAFT_MAX_NODES];
     size_t                pending_join_count;
     raft_command_t        fwd_cmds[RAFT_MAX_QUEUE];

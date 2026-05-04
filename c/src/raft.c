@@ -203,6 +203,19 @@ static size_t normalize_members(const char members[][RAFT_MAX_ID], size_t member
             out_count++;
         }
     }
+    for (i = 1; i < out_count; ++i) {
+        char tmp[RAFT_MAX_ID];
+        j = i;
+        while (j > 0 && strcmp(out[j - 1], out[j]) > 0) {
+            strncpy(tmp, out[j - 1], RAFT_MAX_ID - 1);
+            tmp[RAFT_MAX_ID - 1] = '\0';
+            strncpy(out[j - 1], out[j], RAFT_MAX_ID - 1);
+            out[j - 1][RAFT_MAX_ID - 1] = '\0';
+            strncpy(out[j], tmp, RAFT_MAX_ID - 1);
+            out[j][RAFT_MAX_ID - 1] = '\0';
+            j--;
+        }
+    }
     return out_count;
 }
 
@@ -1233,6 +1246,35 @@ void raft_node_start(raft_node_t *node) {
     node->machine.state = RAFT_ROLE_FOLLOWER;
     node->election_deadline_ms = *node->clock_ms + node_next_election_timeout(node)
                                  + 2 * node->config.election_timeout_ms;
+}
+
+void raft_node_reset_for_join(raft_node_t *node) {
+    memset(&node->config_state, 0, sizeof(node->config_state));
+    memset(node->log, 0, sizeof(node->log));
+    node->log_count                    = 0;
+    node->commit_index                 = 0;
+    node->last_applied                 = 0;
+    node->snapshot_last_included_index = 0;
+    node->snapshot_last_included_term  = 0;
+    node->current_term                 = 0;
+    node->voted_for[0]                 = '\0';
+    node->leader_id[0]                 = '\0';
+    node->vote_count                   = 0;
+    node->pending_append_count         = 0;
+    node->pending_vote_request_count   = 0;
+    node->pending_vote_count           = 0;
+    node->outbox_count                 = 0;
+    node->config.learner               = 1;
+    node->membership_state             = RAFT_MEMBERSHIP_STABLE;
+    node_refresh_peers(node);
+    node->running       = 1;
+    node->machine.state = RAFT_ROLE_FOLLOWER;
+    node->election_deadline_ms = *node->clock_ms + node_next_election_timeout(node)
+                                 + 2 * node->config.election_timeout_ms;
+    node->heartbeat_deadline_ms = *node->clock_ms + node->config.heartbeat_interval_ms;
+    node->persist_dirty = 1;
+    raft_storage_node_save(node);
+    node->persist_dirty = 0;
 }
 
 int raft_node_request_membership_change(raft_node_t *node,

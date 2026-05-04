@@ -227,6 +227,7 @@ int  raft_node_request_membership_change(raft_node_t *node, const char members[]
                                          size_t member_count);
 void raft_node_stop(raft_node_t *node);
 void raft_node_start(raft_node_t *node);
+void raft_node_reset_for_join(raft_node_t *node);
 
 #ifdef __cplusplus
 }

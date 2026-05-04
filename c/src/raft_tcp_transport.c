@@ -68,6 +68,13 @@ static int tcp_send_join(const char *host, int port,
     return 0;
 }
 
+int raft_tcp_transport_send_cluster_join(raft_tcp_transport_t *tcp,
+                                          const raft_tcp_peer_t *members,
+                                          size_t member_count,
+                                          const char *target_host,
+                                          int target_port,
+                                          int forwarded);
+
 /* ── Listener thread ────────────────────────────────────────────────────── */
 
 static void *tcp_listener_thread(void *arg) {
@@ -350,6 +357,8 @@ void raft_tcp_transport_set_data_dir(raft_tcp_transport_t *tcp, const char *dir)
 int raft_tcp_transport_start(raft_tcp_transport_t *tcp) {
     int opt = 1;
     struct sockaddr_in addr;
+    if (tcp->listener_started) return 0;
+    if (tcp->listen_port <= 0) return -1;
     tcp_save_self(tcp);
 
     tcp->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -372,13 +381,28 @@ int raft_tcp_transport_start(raft_tcp_transport_t *tcp) {
     if (pthread_create(&tcp->listener_thread, NULL, tcp_listener_thread, tcp) != 0) {
         close(tcp->listen_fd); tcp->listen_fd = -1; return -1;
     }
+    tcp->listener_started = 1;
     return 0;
+}
+
+int raft_tcp_transport_listen(raft_tcp_transport_t *tcp, int port) {
+    if (port <= 0) return -1;
+    if (tcp->listener_started) return -1;
+    tcp->listen_port = port;
+    return raft_tcp_transport_start(tcp);
+}
+
+int raft_tcp_transport_is_listening(const raft_tcp_transport_t *tcp) {
+    return tcp->listener_started;
 }
 
 void raft_tcp_transport_stop(raft_tcp_transport_t *tcp) {
     tcp->shutdown = 1;
     if (tcp->listen_fd >= 0) { close(tcp->listen_fd); tcp->listen_fd = -1; }
-    pthread_join(tcp->listener_thread, NULL);
+    if (tcp->listener_started) {
+        pthread_join(tcp->listener_thread, NULL);
+        tcp->listener_started = 0;
+    }
     pthread_mutex_destroy(&tcp->lock);
 }
 
@@ -404,6 +428,36 @@ int raft_tcp_transport_request_join(raft_tcp_transport_t *tcp,
     strncpy(jr.host,    my_host, sizeof(jr.host) - 1);
     jr.port      = my_port;
     jr.forwarded = 0;
+    return tcp_send_join(target_host, target_port, &jr);
+}
+
+int raft_tcp_transport_request_cluster_join(raft_tcp_transport_t *tcp,
+                                             const raft_tcp_peer_t *members,
+                                             size_t member_count,
+                                             const char *target_host,
+                                             int target_port) {
+    return raft_tcp_transport_send_cluster_join(tcp, members, member_count,
+                                                target_host, target_port,
+                                                RAFT_JOIN_ORIGINAL);
+}
+
+int raft_tcp_transport_send_cluster_join(raft_tcp_transport_t *tcp,
+                                          const raft_tcp_peer_t *members,
+                                          size_t member_count,
+                                          const char *target_host,
+                                          int target_port,
+                                          int forwarded) {
+    raft_tcp_join_req_t jr;
+    size_t count = member_count < RAFT_MAX_NODES ? member_count : RAFT_MAX_NODES;
+    memset(&jr, 0, sizeof(jr));
+    if (!tcp->own_id[0] || !tcp->own_host[0] || tcp->listen_port <= 0) return -1;
+    strncpy(jr.node_id, tcp->own_id,   RAFT_MAX_ID - 1);
+    strncpy(jr.host,    tcp->own_host, sizeof(jr.host) - 1);
+    jr.port         = tcp->listen_port;
+    jr.forwarded    = forwarded;
+    jr.cluster_join = 1;
+    jr.member_count = count;
+    if (count > 0) memcpy(jr.members, members, count * sizeof(jr.members[0]));
     return tcp_send_join(target_host, target_port, &jr);
 }
 
