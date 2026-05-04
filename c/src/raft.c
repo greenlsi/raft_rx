@@ -605,6 +605,12 @@ static void node_apply_internal_command(raft_node_t *node, const raft_command_t 
                                     new_members, new_count, node->last_applied);
             node->membership_state  = RAFT_MEMBERSHIP_JOINT;
             node->joint_config_index = node->last_applied;
+            /* Keep requested_membership in sync so a follower that becomes
+             * leader can drive the leave_joint with the correct member list. */
+            memcpy(node->requested_membership, new_members,
+                   new_count * sizeof(new_members[0]));
+            node->requested_membership_count   = new_count;
+            node->requested_membership_pending = 1;
             node_refresh_peers(node);
             node->persist_dirty = 1;
 #ifdef RX_TRACE_ENABLE
@@ -618,6 +624,7 @@ static void node_apply_internal_command(raft_node_t *node, const raft_command_t 
         char members[RAFT_MAX_NODES][RAFT_MAX_ID];
         size_t member_count = decode_member_list(command->value, members, RAFT_MAX_NODES);
         if (member_count > 0) {
+            int was_member = node_self_is_member(node);
             configuration_set_stable(&node->config_state, members, member_count, node->last_applied);
             node->membership_state   = RAFT_MEMBERSHIP_STABLE;
             node->final_config_index = node->last_applied;
@@ -626,8 +633,11 @@ static void node_apply_internal_command(raft_node_t *node, const raft_command_t 
             node->requested_membership_count   = 0;
             node_refresh_peers(node);
             node->persist_dirty = 1;
-            /* Node expelled from cluster — stop participating */
-            if (!node_self_is_member(node)) {
+            /* Only stop a node that was actively participating and is now
+             * expelled.  A learner (was_member==0) receiving a leave_joint
+             * that doesn't include it yet must keep running so it can
+             * continue to receive subsequent AppendEntries that will add it. */
+            if (was_member && !node_self_is_member(node)) {
                 node->running = 0;
                 node->leader_id[0] = '\0';
                 node->vote_count   = 0;
@@ -793,8 +803,7 @@ static void raft_node_latch_inputs(rx_fsm_context *ctx, void *user) {
     node->pending_vote_request_count = 0;
     node->pending_vote_count        = 0;
 
-    nmsg = raft_memory_transport_recv_for(node->transport, node->config.node_id,
-                                          messages, RAFT_MAX_QUEUE);
+    nmsg = node->transport.recv(node->transport.ctx, messages, RAFT_MAX_QUEUE);
     for (i = 0; i < nmsg; ++i) {
         raft_message_t *m = &messages[i];
         switch (m->kind) {
@@ -817,8 +826,7 @@ static void raft_node_latch_inputs(rx_fsm_context *ctx, void *user) {
     }
 
     if (node_is_leader(node)) {
-        ncmd = raft_memory_transport_recv_client_commands(node->transport, node->config.node_id,
-                                                          commands, RAFT_MAX_QUEUE);
+        ncmd = node->transport.recv_commands(node->transport.ctx, commands, RAFT_MAX_QUEUE);
         for (i = 0; i < ncmd && node->log_count < RAFT_MAX_LOG; ++i) {
             raft_log_entry_t *entry = &node->log[node->log_count];
             memset(entry, 0, sizeof(*entry));
@@ -830,8 +838,7 @@ static void raft_node_latch_inputs(rx_fsm_context *ctx, void *user) {
             node_broadcast_append_entries(node);
         }
     } else {
-        raft_memory_transport_recv_client_commands(node->transport, node->config.node_id,
-                                                   commands, RAFT_MAX_QUEUE);
+        node->transport.recv_commands(node->transport.ctx, commands, RAFT_MAX_QUEUE);
     }
 }
 
@@ -841,6 +848,15 @@ static void raft_node_dump_outputs(rx_fsm_context *ctx, void *user) {
     (void)ctx;
 
     if (!node->running) { node->outbox_count = 0; return; }
+
+    /*
+     * Advance the leader's commit index proactively on every tick.
+     * This covers single-node clusters (no peer responses ever arrive) and
+     * reduces commit latency when the quorum was already met before the
+     * current tick's AppendEntries responses are processed.
+     */
+    if (node_is_leader(node))
+        node_advance_commit_index(node);
 
     /* Apply committed entries */
     while (node->last_applied < node->commit_index) {
@@ -863,7 +879,7 @@ static void raft_node_dump_outputs(rx_fsm_context *ctx, void *user) {
     }
 
     for (i = 0; i < node->outbox_count; ++i)
-        raft_memory_transport_send(node->transport, &node->outbox[i]);
+        node->transport.send(node->transport.ctx, &node->outbox[i]);
     node->outbox_count = 0;
 }
 
@@ -1032,7 +1048,7 @@ static void action_send_heartbeat(rx_fsm_context *ctx, void *user) {
    Node initialisation
    ────────────────────────────────────────────────────────────────────────── */
 static void raft_node_init(raft_node_t *node, const raft_node_config_t *config,
-                           long *clock_ms, raft_memory_transport_t *transport,
+                           long *clock_ms, raft_transport_t transport,
                            const char *root_dir, const raft_application_t *application,
                            raft_cluster_t *cluster) {
     char initial_members[RAFT_MAX_NODES][RAFT_MAX_ID];
@@ -1041,9 +1057,9 @@ static void raft_node_init(raft_node_t *node, const raft_node_config_t *config,
     memset(node, 0, sizeof(*node));
     node->cluster   = cluster;
     node->config    = *config;
-    node->clock_ms  = clock_ms;
-    node->transport = transport;
-    node->running   = 1;
+    node->clock_ms   = clock_ms;
+    node->transport  = transport;
+    node->running    = 1;
     node->compaction_threshold = RAFT_MAX_LOG;
 
     if (application) node->application = *application;
@@ -1053,8 +1069,32 @@ static void raft_node_init(raft_node_t *node, const raft_node_config_t *config,
 
     if (node->compaction_threshold <= 0) node->compaction_threshold = RAFT_MAX_LOG;
 
-    /* Set stable configuration from storage or from initial config */
-    if (node->config_state.old_count == 0) {
+    /*
+     * Learner (--join): discard any stale persisted state from a previous run.
+     * The node will receive all log entries from the leader and rebuild its
+     * cluster config from AppendEntries.  This covers the common case where
+     * the data directory has state left over from a previous (possibly solo)
+     * cluster run.
+     */
+    if (config->learner) {
+        memset(&node->config_state, 0, sizeof(node->config_state));
+        node->log_count                    = 0;
+        node->commit_index                 = 0;
+        node->last_applied                 = 0;
+        node->snapshot_last_included_index = 0;
+        node->snapshot_last_included_term  = 0;
+        node->current_term                 = 0;
+        node->voted_for[0]                 = '\0';
+        node->persist_dirty                = 1;  /* overwrite stale files on next save */
+    }
+
+    /* Set stable configuration from storage or from initial config.
+     * Skip when log_count > 0: the node was previously a learner whose config
+     * was zeroed on disk; replaying the log from old_count=0 correctly rebuilds
+     * membership through the enter/leave_joint entries.  Applying a synthetic
+     * config before replay causes leave_joint to wrongly mark the node expelled.
+     */
+    if (node->config_state.old_count == 0 && !config->learner && node->log_count == 0) {
         if (config->initial_member_count > 0) {
             configuration_set_stable(&node->config_state,
                                      config->initial_members, config->initial_member_count, 0);
@@ -1070,7 +1110,12 @@ static void raft_node_init(raft_node_t *node, const raft_node_config_t *config,
                              ? RAFT_MEMBERSHIP_JOINT : RAFT_MEMBERSHIP_STABLE;
     node_refresh_peers(node);
 
-    node->election_deadline_ms  = *clock_ms + node_next_election_timeout(node);
+    /* Restarting node: use 2x election timeout as initial deadline so an
+     * existing leader has time to send heartbeats before a new election
+     * fires and disrupts the cluster. */
+    node->election_deadline_ms  = *clock_ms + node_next_election_timeout(node)
+                                  + (node->current_term > 0
+                                     ? 2 * config->election_timeout_ms : 0);
     node->heartbeat_deadline_ms = *clock_ms + config->heartbeat_interval_ms;
 
     rx_fsm_machine_init(&node->machine, config->node_id, RAFT_ROLE_FOLLOWER,
@@ -1118,7 +1163,8 @@ raft_node_t *raft_cluster_add_node(raft_cluster_t *cluster, const raft_node_conf
     if (cluster->node_count >= RAFT_MAX_NODES) return NULL;
     node = &cluster->nodes[cluster->node_count++];
     raft_memory_transport_register_node(&cluster->transport, config->node_id);
-    raft_node_init(node, config, &cluster->clock_ms, &cluster->transport, root_dir, application, cluster);
+    raft_node_init(node, config, &cluster->clock_ms, raft_mem_transport_make(node),
+                   root_dir, application, cluster);
     if (rx_fsm_runtime_add_machine(cluster->runtime, &node->machine, period_us, 0) != 0) return NULL;
 #ifdef RX_TRACE_ENABLE
     if (cluster->trace) {
@@ -1147,8 +1193,46 @@ raft_node_t *raft_cluster_leader(raft_cluster_t *cluster) {
    ────────────────────────────────────────────────────────────────────────── */
 int raft_node_submit_command(raft_node_t *node, const raft_command_t *command) {
     if (!node->running || !node_self_is_member(node)) return -1;
-    return raft_memory_transport_submit_client_command(node->transport,
-                                                       node->config.node_id, command);
+    return node->transport.submit_command(node->transport.ctx, command);
+}
+
+void raft_node_stop(raft_node_t *node) {
+    node->running = 0;
+    if (node->transport.set_enabled)
+        node->transport.set_enabled(node->transport.ctx, 0);
+    node->outbox_count              = 0;
+    node->pending_append_count      = 0;
+    node->pending_vote_request_count = 0;
+    node->pending_vote_count        = 0;
+    node->machine.state             = RAFT_ROLE_FOLLOWER;
+    /* Keep leader_id so status shows the last known leader right after restart.
+     * It is corrected on the first heartbeat received after start(). */
+}
+
+void raft_node_start(raft_node_t *node) {
+    if (node->transport.set_enabled)
+        node->transport.set_enabled(node->transport.ctx, 1);
+    raft_storage_node_load(node);
+    /* Mirror the raft_node_init fallback, with the same log_count guard. */
+    if (node->config_state.old_count == 0 && !node->config.learner && node->log_count == 0) {
+        if (node->config.initial_member_count > 0) {
+            configuration_set_stable(&node->config_state,
+                                     node->config.initial_members,
+                                     node->config.initial_member_count, 0);
+        } else {
+            char initial[RAFT_MAX_NODES][RAFT_MAX_ID];
+            size_t count = 0, i;
+            strncpy(initial[count++], node->config.node_id, RAFT_MAX_ID - 1);
+            for (i = 0; i < node->config.peer_count && count < RAFT_MAX_NODES; ++i)
+                strncpy(initial[count++], node->config.peers[i], RAFT_MAX_ID - 1);
+            configuration_set_stable(&node->config_state, initial, count, 0);
+        }
+        node_refresh_peers(node);
+    }
+    node->running       = 1;
+    node->machine.state = RAFT_ROLE_FOLLOWER;
+    node->election_deadline_ms = *node->clock_ms + node_next_election_timeout(node)
+                                 + 2 * node->config.election_timeout_ms;
 }
 
 int raft_node_request_membership_change(raft_node_t *node,

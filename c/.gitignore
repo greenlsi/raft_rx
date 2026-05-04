@@ -1,0 +1,4 @@
+build/
+compile_commands.json
+examples/*/build/
+examples/*/compile_commands.json

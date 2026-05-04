@@ -547,7 +547,11 @@ class RaftNode:
         return self.node_id in self.config_state.all_members()
 
     def _timeout_expired(self) -> bool:
-        return self._is_voting_member() and self.clock.now_ms() >= self.election_deadline_ms
+        return (
+            self._is_voting_member()
+            and self.clock.now_ms() >= self.election_deadline_ms
+            and not self.pending_append_entries
+        )
 
     def _has_append_entries(self) -> bool:
         return bool(self.pending_append_entries)

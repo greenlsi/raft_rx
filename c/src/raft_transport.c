@@ -1,6 +1,42 @@
 #include "raft/raft.h"
 
+#include <stddef.h>
 #include <string.h>
+
+/* ── Memory transport vtable adapter ─────────────────────────────────────── */
+
+static int _mem_send(void *ctx, const raft_message_t *msg) {
+    raft_node_t *n = (raft_node_t *)ctx;
+    return raft_memory_transport_send(&n->cluster->transport, msg);
+}
+
+static size_t _mem_recv(void *ctx, raft_message_t *out, size_t capacity) {
+    raft_node_t *n = (raft_node_t *)ctx;
+    return raft_memory_transport_recv_for(&n->cluster->transport, n->config.node_id, out, capacity);
+}
+
+static int _mem_submit_command(void *ctx, const raft_command_t *cmd) {
+    raft_node_t *n = (raft_node_t *)ctx;
+    return raft_memory_transport_submit_client_command(&n->cluster->transport,
+                                                       n->config.node_id, cmd);
+}
+
+static size_t _mem_recv_commands(void *ctx, raft_command_t *out, size_t capacity) {
+    raft_node_t *n = (raft_node_t *)ctx;
+    return raft_memory_transport_recv_client_commands(&n->cluster->transport,
+                                                      n->config.node_id, out, capacity);
+}
+
+raft_transport_t raft_mem_transport_make(raft_node_t *node) {
+    raft_transport_t t;
+    t.send           = _mem_send;
+    t.recv           = _mem_recv;
+    t.submit_command = _mem_submit_command;
+    t.recv_commands  = _mem_recv_commands;
+    t.set_enabled    = NULL;
+    t.ctx            = node;
+    return t;
+}
 
 static int transport_find_node(raft_memory_transport_t *transport, const char *node_id) {
     size_t i;

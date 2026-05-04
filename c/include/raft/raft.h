@@ -97,6 +97,16 @@ typedef struct {
     size_t node_count;
 } raft_memory_transport_t;
 
+/* Pluggable transport vtable — implement to support TCP, BLE, etc. */
+typedef struct {
+    int    (*send)           (void *ctx, const raft_message_t *msg);
+    size_t (*recv)           (void *ctx, raft_message_t *out, size_t capacity);
+    int    (*submit_command) (void *ctx, const raft_command_t *cmd);
+    size_t (*recv_commands)  (void *ctx, raft_command_t *out, size_t capacity);
+    void   (*set_enabled)    (void *ctx, int enabled); /* optional, may be NULL */
+    void *ctx;
+} raft_transport_t;
+
 typedef struct raft_node    raft_node_t;
 typedef struct raft_cluster raft_cluster_t;
 
@@ -106,6 +116,7 @@ typedef struct {
     size_t peer_count;
     char initial_members[RAFT_MAX_NODES][RAFT_MAX_ID];
     size_t initial_member_count;
+    int learner;                 /* 1 = joining node; skip auto-bootstrap */
     int election_timeout_ms;
     int heartbeat_interval_ms;
 } raft_node_config_t;
@@ -122,7 +133,7 @@ struct raft_node {
     raft_cluster_t    *cluster;
     raft_node_config_t config;
     long *clock_ms;
-    raft_memory_transport_t *transport;
+    raft_transport_t transport;
     raft_file_storage_t storage;
     raft_application_t application;
 
@@ -180,7 +191,9 @@ struct raft_cluster {
 #endif
 };
 
-/* Transport */
+/* Transport — memory (in-process) adapter */
+raft_transport_t raft_mem_transport_make(raft_node_t *node);
+
 void raft_memory_transport_init(raft_memory_transport_t *transport);
 int raft_memory_transport_register_node(raft_memory_transport_t *transport, const char *node_id);
 int raft_memory_transport_send(raft_memory_transport_t *transport, const raft_message_t *message);
@@ -209,9 +222,11 @@ int raft_cluster_attach_trace(raft_cluster_t *cluster, rx_trace_buf_t *trace);
 #endif
 
 /* Node */
-int raft_node_submit_command(raft_node_t *node, const raft_command_t *command);
-int raft_node_request_membership_change(raft_node_t *node, const char members[][RAFT_MAX_ID],
-                                        size_t member_count);
+int  raft_node_submit_command(raft_node_t *node, const raft_command_t *command);
+int  raft_node_request_membership_change(raft_node_t *node, const char members[][RAFT_MAX_ID],
+                                         size_t member_count);
+void raft_node_stop(raft_node_t *node);
+void raft_node_start(raft_node_t *node);
 
 #ifdef __cplusplus
 }

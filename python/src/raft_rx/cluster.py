@@ -27,6 +27,7 @@ class RaftCluster:
         self,
         clock: Clock | None = None,
         transport: MemoryTransport | None = None,
+        runtime: fsm.Runtime | None = None,
         *,
         application_factory: Callable[[str], RaftApplication] | None = None,
         paths_factory: Callable[[str], ClusterNodePaths] | None = None,
@@ -36,7 +37,7 @@ class RaftCluster:
     ) -> None:
         self.clock = clock or ManualClock()
         self.transport = transport or MemoryTransport()
-        self.runtime = fsm.Runtime()
+        self.runtime = runtime if runtime is not None else fsm.Runtime()
         self.nodes: dict[str, RaftNode] = {}
         self.paths: dict[str, ClusterNodePaths] = {}
         self.application_factory = application_factory
@@ -51,6 +52,7 @@ class RaftCluster:
         config: NodeConfig,
         paths: ClusterNodePaths,
         application: RaftApplication,
+        period_us: int = 0,
     ) -> RaftNode:
         telemetry: TelemetrySink
         if paths.telemetry_path is None:
@@ -68,9 +70,9 @@ class RaftCluster:
         )
         self.nodes[config.node_id] = node
         self.paths[config.node_id] = paths
-        self.runtime.add_machine(node.machine)
-        self.runtime.add_machine(node.compaction_machine)
-        self.runtime.add_machine(node.membership_machine)
+        self.runtime.add_machine(node.machine, period_us)
+        self.runtime.add_machine(node.compaction_machine, period_us)
+        self.runtime.add_machine(node.membership_machine, period_us)
         self._refresh_trace_attachment()
         return node
 

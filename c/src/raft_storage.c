@@ -261,6 +261,16 @@ void raft_storage_node_load(raft_node_t *node) {
         fclose(fp);
     }
 
+    /* Clamp commit_index to what is actually present in the log + snapshot.
+     * A mismatch means the log file was truncated or lost; accepting a higher
+     * commit_index would cause the node to apply zeroed garbage entries and
+     * corrupt vote-log comparisons (last_log_term / last_log_index). */
+    {
+        int actual_last = node->snapshot_last_included_index + (int)node->log_count;
+        if (node->commit_index > actual_last)
+            node->commit_index = actual_last;
+    }
+
     /* Restore application state */
     if (snap_loaded) {
         if (node->application.restore_snapshot)
