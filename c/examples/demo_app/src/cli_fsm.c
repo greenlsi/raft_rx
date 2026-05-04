@@ -34,6 +34,44 @@ static int peer_list_contains(const raft_tcp_peer_t *peers, size_t count, const 
     return 0;
 }
 
+static int find_peer_address(const cli_user_t *cli, const char *id, char *host, int *port);
+
+static void forward_merge_peers_to_local_members(cli_user_t *cli, const raft_tcp_join_req_t *jr) {
+    const raft_node_t *node = cli->node;
+    char sent[RAFT_MAX_NODES][RAFT_MAX_ID];
+    size_t sent_count = 0;
+    size_t i;
+    char host[256];
+    int port;
+
+    for (i = 0; i < node->config_state.old_count; ++i) {
+        const char *id = node->config_state.old_members[i];
+        if (strcmp(id, node->config.node_id) == 0) continue;
+        if (strcmp(id, jr->node_id) == 0) continue;
+        if (peer_list_contains(jr->members, jr->member_count, id)) continue;
+        if (member_contains(sent, sent_count, id)) continue;
+        if (find_peer_address(cli, id, host, &port) == 0) {
+            raft_tcp_transport_send_cluster_join(cli->tcp, jr->members,
+                                                 jr->member_count, host, port,
+                                                 RAFT_JOIN_ANNOUNCE);
+            strncpy(sent[sent_count++], id, RAFT_MAX_ID - 1);
+        }
+    }
+    for (i = 0; i < node->config_state.new_count; ++i) {
+        const char *id = node->config_state.new_members[i];
+        if (strcmp(id, node->config.node_id) == 0) continue;
+        if (strcmp(id, jr->node_id) == 0) continue;
+        if (peer_list_contains(jr->members, jr->member_count, id)) continue;
+        if (member_contains(sent, sent_count, id)) continue;
+        if (find_peer_address(cli, id, host, &port) == 0) {
+            raft_tcp_transport_send_cluster_join(cli->tcp, jr->members,
+                                                 jr->member_count, host, port,
+                                                 RAFT_JOIN_ANNOUNCE);
+            strncpy(sent[sent_count++], id, RAFT_MAX_ID - 1);
+        }
+    }
+}
+
 static int node_is_member(const raft_node_t *node) {
     return member_contains(node->config_state.old_members,
                            node->config_state.old_count,
@@ -643,6 +681,7 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
                                                      RAFT_JOIN_ANNOUNCE);
                 jr->forwarded = RAFT_JOIN_PENDING;
             } else if (jr->forwarded == RAFT_JOIN_ANNOUNCE) {
+                forward_merge_peers_to_local_members(cli, jr);
                 jr->forwarded = RAFT_JOIN_PENDING;
             }
 
@@ -650,6 +689,10 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
                 request_membership_union(cli, jr);
                 printf("\n[cluster] merge: %s\n", jr->node_id);
                 cli->prompt_needed = 1;
+                cli->pending_joins[i] = cli->pending_joins[--cli->pending_join_count];
+            } else if (jr->forwarded == RAFT_JOIN_PENDING &&
+                       jr->cluster_join &&
+                       jr->member_count > 0) {
                 cli->pending_joins[i] = cli->pending_joins[--cli->pending_join_count];
             } else {
                 ++i;
