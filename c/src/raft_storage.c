@@ -182,6 +182,19 @@ void raft_storage_node_load(raft_node_t *node) {
     storage_log_path(&node->storage, log_path, sizeof(log_path));
     storage_snapshot_path(&node->storage, snapshot_path, sizeof(snapshot_path));
 
+    node->current_term = 0;
+    node->voted_for[0] = '\0';
+    memset(node->log, 0, sizeof(node->log));
+    node->log_count = 0;
+    node->snapshot_last_included_index = 0;
+    node->snapshot_last_included_term = 0;
+    node->commit_index = 0;
+    node->last_applied = 0;
+    node->storage.snapshot_buf_size = 0;
+    memset(node->storage.snapshot_buf, 0, sizeof(node->storage.snapshot_buf));
+    node->compaction_threshold = RAFT_MAX_LOG;
+    memset(&node->config_state, 0, sizeof(node->config_state));
+
     fp = fopen(meta_path, "r");
     if (fp != NULL) {
         while (fgets(line, sizeof(line), fp) != NULL) {
@@ -251,7 +264,7 @@ void raft_storage_node_load(raft_node_t *node) {
         while (fgets(line, sizeof(line), fp) != NULL && node->log_count < RAFT_MAX_LOG) {
             raft_log_entry_t entry;
             memset(&entry, 0, sizeof(entry));
-            if (sscanf(line, "%d|%d|%15[^|]|%63[^|]|%127[^\n]",
+            if (sscanf(line, "%d|%d|%31[^|]|%63[^|]|%127[^\n]",
                        &entry.index, &entry.term, entry.command.op,
                        entry.command.key, entry.command.value) == 5) {
                 if (entry.index <= node->snapshot_last_included_index) continue;

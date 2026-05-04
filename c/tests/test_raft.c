@@ -140,6 +140,21 @@ int main(void) {
         assert(strcmp(raft_kv_get(&kv2[i], "alpha"), "1") == 0);
         assert(restarted->nodes[i].config_state.old_count == 4);
         assert(restarted->nodes[i].config_state.new_count == 0);
+        assert(restarted->nodes[i].log_count > 0);
+        assert(restarted->nodes[i].log[0].index == 1);
+    }
+
+    {
+        raft_node_t *node = &restarted->nodes[0];
+        size_t before_count = node->log_count;
+        assert(before_count > 0);
+
+        raft_node_stop(node);
+        raft_node_start(node);
+
+        assert(node->log_count == before_count);
+        for (i = 0; i < node->log_count; ++i)
+            assert(node->log[i].index == (int)i + 1);
     }
 
     raft_cluster_destroy(restarted);
