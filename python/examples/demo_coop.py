@@ -1,3 +1,6 @@
+# Copyright 2026 Jose M. Moya <jm.moya@upm.es>
+# SPDX-License-Identifier: MIT
+
 """
 demo_coop.py — Python equivalent of examples/demo_app/src/main.c.
 

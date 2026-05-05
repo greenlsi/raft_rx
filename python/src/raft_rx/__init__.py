@@ -1,3 +1,6 @@
+# Copyright 2026 Jose M. Moya <jm.moya@upm.es>
+# SPDX-License-Identifier: MIT
+
 from .application import RaftApplication
 from .clock import ManualClock, SystemClock
 from .cluster import RaftCluster

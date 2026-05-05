@@ -1,99 +1,61 @@
-# raft_rx C — User Guide
-
-This guide explains how to use the `raft_rx` C library to build a replicated,
-fault-tolerant application.  It covers the architecture, the integration API,
-the TCP transport, cluster lifecycle, and all configuration knobs.
+# raft_rx - C User Guide
 
 ---
 
-## Table of contents
-
-1. [Overview](#1-overview)
-2. [Architecture](#2-architecture)
-3. [Key concepts](#3-key-concepts)
-4. [Quick start — the demo app](#4-quick-start--the-demo-app)
-5. [Integrating raft_rx into your application](#5-integrating-raft_rx-into-your-application)
-   - 5.1 [Implement `raft_application_t`](#51-implement-raft_application_t)
-   - 5.2 [Bootstrap the cluster](#52-bootstrap-the-cluster)
-   - 5.3 [Attach the transport](#53-attach-the-transport)
-   - 5.4 [Run the event loop](#54-run-the-event-loop)
-   - 5.5 [Submit commands](#55-submit-commands)
-   - 5.6 [Complete minimal example](#56-complete-minimal-example)
-6. [TCP transport](#6-tcp-transport)
-   - 6.1 [Initialization](#61-initialization)
-   - 6.2 [Peer persistence](#62-peer-persistence)
-   - 6.3 [Self persistence](#63-self-persistence)
-   - 6.4 [The listener thread](#64-the-listener-thread)
-7. [Cluster lifecycle](#7-cluster-lifecycle)
-   - 7.1 [Bootstrap a fresh cluster](#71-bootstrap-a-fresh-cluster)
-   - 7.2 [Restarting a node](#72-restarting-a-node)
-   - 7.3 [Adding a node (`--join`)](#73-adding-a-node---join)
-   - 7.4 [Removing a node](#74-removing-a-node)
-8. [Membership changes internals](#8-membership-changes-internals)
-9. [Persistence and storage format](#9-persistence-and-storage-format)
-10. [Configuration reference](#10-configuration-reference)
-11. [Limits reference](#11-limits-reference)
-12. [Building](#12-building)
-13. [Troubleshooting](#13-troubleshooting)
+# Part I — The Library
 
 ---
 
 ## 1. Overview
 
-`raft_rx` is a C implementation of the
-[Raft consensus algorithm](https://raft.github.io/) built on top of the
-`rxnet` reactive-synchronous runtime.  It provides:
+`raft_rx` is a C library that implements the
+[Raft consensus algorithm](https://raft.github.io/) on top of the `rxnet`
+reactive-synchronous runtime.  It provides:
 
 - **Replicated state machine** — commands are appended to a distributed log,
-  committed by majority, and applied to your application in order.
+  committed by majority quorum, and applied to your application in strict order.
 - **Leader election** — automatic election with randomised timeouts; the
-  cluster self-heals after a leader failure.
+  cluster self-heals after a leader failure with no operator intervention.
 - **Membership changes** — safe joint-consensus reconfiguration; nodes can be
-  added or removed without stopping the cluster.
+  added or removed while the cluster is running.
 - **Persistent storage** — term, log, snapshot, and membership configuration
   survive process restarts.
-- **Pluggable transport** — swap the default in-memory transport for TCP (or
+- **Pluggable transport** — swap the built-in in-memory transport for TCP (or
   any other medium) by implementing five function pointers.
-- **Pluggable application** — implement four callbacks to connect your state
-  machine; the built-in key-value store is one example.
+- **Pluggable application** — implement four callbacks to connect your own
+  state machine; the library is otherwise agnostic to what the commands mean.
 
 ---
 
 ## 2. Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Your application                       │
-│   raft_application_t  { apply, reload, snapshot, ... }  │
-└────────────────────────┬────────────────────────────────┘
-                         │ committed commands
-┌────────────────────────▼────────────────────────────────┐
-│               raft_rx consensus engine                   │
-│  raft_cluster_t  ╌╌  raft_node_t  (rx_fsm_machine)      │
-│  leader election · log replication · membership changes  │
-└──────────┬─────────────────────────────┬────────────────┘
-           │ raft_transport_t            │ raft_file_storage_t
-┌──────────▼───────────┐    ┌───────────▼──────────────────┐
-│   Network transport  │    │   Disk storage               │
-│  raft_tcp_transport  │    │  meta.txt  log.txt           │
-│  (or memory / BLE …) │    │  snapshot.bin  peers.txt     │
-└──────────────────────┘    └──────────────────────────────┘
-           │
-┌──────────▼──────────────────┐
-│   rxnet cooperative runtime │
-│   rx_coop_exec              │
-└─────────────────────────────┘
-```
+```mermaid
+graph TD
+    APP["<b>Your application</b><br/><code>raft_application_t</code><br/>apply · reload · snapshot · restore_snapshot"]
+    RAFT["<b>raft_rx consensus engine</b><br/><code>raft_cluster_t / raft_node_t</code><br/>leader election · log replication · membership changes"]
+    TRANSPORT["<b>Network transport</b><br/><code>raft_transport_t</code><br/>memory (tests) · TCP · custom"]
+    STORAGE["<b>Disk storage</b><br/><code>raft_file_storage_t</code><br/>meta.txt · log.txt · snapshot.bin"]
+    RUNTIME["<b>rxnet executor</b><br/><code>rx_coop_exec / rx_cyclic_exec / rx_thread_exec</code><br/>drives all FSMs on a schedule"]
 
-### Layer responsibilities
+    APP -- "committed commands" --> RAFT
+    RAFT -- "raft_transport_t" --> TRANSPORT
+    RAFT -- "raft_file_storage_t" --> STORAGE
+    RAFT -- "rx_fsm_machine" --> RUNTIME
+
+    style APP       fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style RAFT      fill:#dcfce7,stroke:#22c55e,color:#14532d
+    style TRANSPORT fill:#fef9c3,stroke:#eab308,color:#713f12
+    style STORAGE   fill:#fef9c3,stroke:#eab308,color:#713f12
+    style RUNTIME   fill:#f3e8ff,stroke:#a855f7,color:#3b0764
+```
 
 | Layer | Type | Responsibility |
 |---|---|---|
-| Application | `raft_application_t` | Your state machine — what commands *mean* |
-| Consensus engine | `raft_cluster_t` / `raft_node_t` | Raft protocol, leader election, log replication |
-| Transport | `raft_transport_t` | Send/receive messages between nodes |
-| Storage | `raft_file_storage_t` | Durable persistence of Raft state |
-| Runtime | `rx_coop_exec` | Cooperative execution of all FSMs in one thread |
+| **Application** | `raft_application_t` | Your state machine — what commands mean |
+| **Consensus engine** | `raft_cluster_t` / `raft_node_t` | Raft protocol: leader election, log replication, membership |
+| **Transport** | `raft_transport_t` | Send/receive messages between nodes |
+| **Storage** | `raft_file_storage_t` | Durable persistence of Raft state |
+| **Runtime** | `rx_*_exec` | Cooperative/cyclic/thread scheduling of all FSMs |
 
 ---
 
@@ -101,43 +63,49 @@ the TCP transport, cluster lifecycle, and all configuration knobs.
 
 ### Roles
 
-Every node is always in one of three roles:
+Every node is always in exactly one of three roles:
 
 | Role | Description |
 |---|---|
-| **Follower** | Passive; applies log entries sent by the leader |
-| **Candidate** | Running for election after election timeout expires |
-| **Leader** | Accepts client commands, replicates them to followers |
+| **Follower** | Passive; accepts log entries replicated by the leader |
+| **Candidate** | Running for election after the election timeout expires |
+| **Leader** | Accepts client commands, replicates them, commits when quorum reached |
 
 ### Log, terms, and commit
 
-- Each command submitted by a client becomes a **log entry** `(index, term, command)`.
-- The leader replicates entries to a majority of nodes, then **commits** them.
-- Once committed, the leader calls `apply` on each node's application in index order.
+- Each client command becomes a **log entry** with fields `(index, term, command)`.
+- The leader replicates entries to a quorum of nodes, then marks them **committed**.
+- Committed entries are applied to every node's application in index order via `apply`.
 - A **term** is a monotonically increasing counter that advances with each
-  election.  Terms are the Raft equivalent of a logical clock.
+  election — the Raft equivalent of a logical clock.
 
 ### Membership configuration
 
-Raft tracks which nodes are authoritative members of the cluster.  `raft_rx`
-stores this as `raft_cluster_configuration_t`:
+`raft_rx` tracks which nodes form the authoritative quorum as
+`raft_cluster_configuration_t`:
 
 ```c
 typedef struct {
-    char   old_members[RAFT_MAX_NODES][RAFT_MAX_ID]; /* stable or leaving set */
+    char   old_members[RAFT_MAX_NODES][RAFT_MAX_ID]; /* current or leaving set */
     size_t old_count;
     char   new_members[RAFT_MAX_NODES][RAFT_MAX_ID]; /* joining set (joint only) */
     size_t new_count;
-    int    index;      /* log index where this config was committed */
+    int    index;   /* log index where this config was written */
 } raft_cluster_configuration_t;
 ```
 
-`old_count > 0, new_count == 0` → **stable** configuration  
-`old_count > 0, new_count > 0` → **joint** configuration (transition in progress)
+`old_count > 0, new_count == 0` means **stable** configuration.  
+`old_count > 0, new_count > 0` means **joint** configuration (transition in progress).
 
-### The application interface
+The configuration is persisted in `meta.txt` and replayed on restart.
 
-Your application plugs into the consensus engine through four callbacks:
+---
+
+## 4. Implementing your application
+
+### 4.1 The application interface
+
+Connect your state machine to the consensus engine by filling in four callbacks:
 
 ```c
 typedef struct {
@@ -149,94 +117,38 @@ typedef struct {
 } raft_application_t;
 ```
 
-| Callback | When called | What to do |
-|---|---|---|
-| `apply` | Each time a command is committed | Mutate your state machine |
-| `reload` | Node restart with no snapshot on disk | Re-apply log from scratch (start from zero) |
-| `snapshot` | Log compaction requested | Serialise current state into `buf`; return bytes written |
-| `restore_snapshot` | Node restart with a snapshot on disk | Deserialise `buf` into your state machine |
-
----
-
-## 4. Quick start — the demo app
-
-The demo app ships a ready-to-run multi-process cluster.  Each process is a
-Raft node with a built-in key-value store and a readline CLI.
-
-### Build
-
-```bash
-# From the repo root
-make -C c/examples/demo_app
-# Result: c/examples/demo_app/build/raft_node
-```
-
-### Start a 3-node cluster
-
-Open three terminals in `c/examples/demo_app/`:
-
-```bash
-# Terminal 1
-./build/raft_node --id n1 --port 5001 \
-  --member n1 --member n2 --member n3 \
-  --peer n2=127.0.0.1:5002 --peer n3=127.0.0.1:5003
-
-# Terminal 2
-./build/raft_node --id n2 --port 5002 \
-  --member n1 --member n2 --member n3 \
-  --peer n1=127.0.0.1:5001 --peer n3=127.0.0.1:5003
-
-# Terminal 3
-./build/raft_node --id n3 --port 5003 \
-  --member n1 --member n2 --member n3 \
-  --peer n1=127.0.0.1:5001 --peer n2=127.0.0.1:5002
-```
-
-After ~1 s a leader is elected.  Try these CLI commands on any node:
-
-```
-n1> set foo bar        # write (only accepted on the leader)
-n2> get foo            # read local state: bar
-n1> status             # role, term, leader, commit index
-n1> members            # current cluster membership
-n1> log                # Raft log entries
-```
-
-### Restart a node
-
-Once nodes have run at least once their state is persisted under `var/raft/`.
-Restarting is simple — only `--id` is required:
-
-```bash
-./build/raft_node --id n1
-```
-
-Port, peers, and membership are recovered automatically from disk.
-
----
-
-## 5. Integrating raft_rx into your application
-
-This section shows how to embed `raft_rx` into your own C program step by step.
-
-### 5.1 Implement `raft_application_t`
-
-Define what a command means for your state machine.  A command is:
+A command is a fixed-size triple of C strings that the library treats as opaque:
 
 ```c
 typedef struct {
-    char op   [32];              /* operation name, e.g. "set", "del" */
-    char key  [RAFT_MAX_KEY];    /* primary key     (max 63 chars)    */
-    char value[RAFT_MAX_VALUE];  /* payload / value (max 127 chars)   */
+    char op   [32];              /* operation name — "set", "del", "inc", … */
+    char key  [RAFT_MAX_KEY];    /* primary key     (max 63 chars)           */
+    char value[RAFT_MAX_VALUE];  /* payload / value (max 127 chars)          */
 } raft_command_t;
 ```
 
-You choose how to interpret `op`, `key`, and `value`; the consensus engine
-treats them as opaque strings.
+| Callback | When it is called | What you must do |
+|---|---|---|
+| `apply` | Once per committed log entry, in index order | Mutate your state — this is the only place you should do so |
+| `reload` | Restart with no snapshot on disk | Reset to the empty state; the engine re-applies the full log via `apply` |
+| `snapshot` | Log compaction | Serialise your current state into `buf` (max `buf_size` bytes); return bytes written |
+| `restore_snapshot` | Restart with a snapshot on disk | Deserialise `buf` into your state; the engine then re-applies any log entries that follow |
+
+> **Correctness rule**: `apply` is called exactly once per entry, always on the
+> rxnet compute thread.  Do **not** mutate your state outside of `apply`, and do
+> **not** spawn threads inside it.
+
+> **Snapshot size**: The snapshot buffer is `RAFT_MAX_SNAPSHOT_SIZE` bytes
+> (default 4096).  Override it before including `raft.h` if your state is
+> larger:
+> ```c
+> #define RAFT_MAX_SNAPSHOT_SIZE (256 * 1024)
+> #include "raft/raft.h"
+> ```
+
+### 4.2 Example: replicated counter
 
 ```c
-/* Example: a simple counter replicated across nodes */
-
 typedef struct { int counter; } my_state_t;
 
 static void my_apply(void *user, const raft_command_t *cmd) {
@@ -248,123 +160,138 @@ static void my_apply(void *user, const raft_command_t *cmd) {
 }
 
 static void my_reload(void *user) {
-    /* Called on restart when there is no snapshot.
-     * The engine will re-apply every committed log entry through my_apply,
-     * so here you only need to reset to the "empty" state. */
-    my_state_t *s = (my_state_t *)user;
-    s->counter = 0;
+    ((my_state_t *)user)->counter = 0;  /* reset; log replay rebuilds state */
 }
 
 static size_t my_snapshot(void *user, void *buf, size_t buf_size) {
-    my_state_t *s = (my_state_t *)user;
-    int n = snprintf((char *)buf, buf_size, "%d\n", s->counter);
+    int n = snprintf((char *)buf, buf_size, "%d\n",
+                     ((my_state_t *)user)->counter);
     return (n > 0 && (size_t)n < buf_size) ? (size_t)n : 0;
 }
 
 static void my_restore_snapshot(void *user, const void *buf, size_t size) {
-    my_state_t *s = (my_state_t *)user;
     (void)size;
-    s->counter = atoi((const char *)buf);
+    ((my_state_t *)user)->counter = atoi((const char *)buf);
 }
 
-raft_application_t my_make_app(my_state_t *state) {
+raft_application_t my_make_app(my_state_t *s) {
     raft_application_t app;
     app.apply            = my_apply;
     app.reload           = my_reload;
     app.snapshot         = my_snapshot;
     app.restore_snapshot = my_restore_snapshot;
-    app.user             = state;
+    app.user             = s;
     return app;
 }
 ```
 
-> **Correctness rule**: `apply` is called exactly once per committed log entry
-> in index order, and always on the rxnet thread (single-threaded by design).
-> Do **not** spawn threads inside `apply`.
+---
 
-> **Snapshot size**: The snapshot buffer is
-> `RAFT_MAX_SNAPSHOT_SIZE` bytes (default 4096).  Override it before including
-> `raft.h` if your state is larger:
-> ```c
-> #define RAFT_MAX_SNAPSHOT_SIZE (64 * 1024)
-> #include "raft/raft.h"
-> ```
+## 5. Setting up the cluster
 
-### 5.2 Bootstrap the cluster
-
-Create the runtime, cluster, and one node per process:
+### 5.1 Create the runtime and cluster
 
 ```c
-rx_fsm_runtime  runtime;
-raft_cluster_t  cluster;
-raft_node_t    *node;
-my_state_t      state = {0};
+rx_fsm_runtime runtime;
+raft_cluster_t cluster;
 
-/* 1. Runtime — capacity = number of rx_fsm_machines you will register
- *    (one per Raft node + one per auxiliary FSM, e.g. a CLI). */
+/* capacity = total number of rx_fsm_machines you will register
+ * (one per Raft node + one per auxiliary FSM such as a CLI or sensor reader) */
 rx_fsm_runtime_init(&runtime, 2);
 raft_cluster_init(&cluster, &runtime);
-raft_cluster_enable_realtime_clock(&cluster);  /* wall-clock ticks */
+raft_cluster_enable_realtime_clock(&cluster);  /* use wall-clock time */
+```
 
-/* 2. Node configuration */
+### 5.2 Configure the node
+
+```c
 raft_node_config_t cfg;
 memset(&cfg, 0, sizeof(cfg));
+
 strncpy(cfg.node_id, "n1", RAFT_MAX_ID - 1);
-cfg.election_timeout_ms   = 500;   /* ms before follower starts election */
-cfg.heartbeat_interval_ms = 100;   /* ms between leader heartbeats      */
+cfg.election_timeout_ms   = 500;   /* base timeout before starting election */
+cfg.heartbeat_interval_ms = 100;   /* leader sends heartbeats at this rate  */
 
-/* Initial membership — list every node that starts together.
- * All nodes in the initial cluster must declare the same set.
- * Leave this empty (member_count = 0) for nodes joining via --join. */
-strncpy(cfg.initial_members[0], "n1", RAFT_MAX_ID - 1);
-strncpy(cfg.initial_members[1], "n2", RAFT_MAX_ID - 1);
-strncpy(cfg.initial_members[2], "n3", RAFT_MAX_ID - 1);
-cfg.initial_member_count = 3;
-
-/* Peers — IDs of other nodes this node will talk to.
- * The transport uses these IDs to route messages. */
+/* IDs of the other nodes this node will talk to.
+ * The transport uses these to route outgoing messages. */
 strncpy(cfg.peers[0], "n2", RAFT_MAX_ID - 1);
 strncpy(cfg.peers[1], "n3", RAFT_MAX_ID - 1);
 cfg.peer_count = 2;
 
-/* 3. Build the application */
-raft_application_t app = my_make_app(&state);
-
-/* 4. Add the node to the cluster.
- *    "var/myapp" is the root data directory; the engine stores state under
- *    var/myapp/n1/ for a node with id "n1". */
-node = raft_cluster_add_node(&cluster, &cfg, "var/myapp", &app, 10000 /* tick µs */);
+/* IDs of ALL nodes in the initial cluster — must be identical on every node.
+ * Leave empty (initial_member_count = 0) for nodes joining an existing cluster. */
+strncpy(cfg.initial_members[0], "n1", RAFT_MAX_ID - 1);
+strncpy(cfg.initial_members[1], "n2", RAFT_MAX_ID - 1);
+strncpy(cfg.initial_members[2], "n3", RAFT_MAX_ID - 1);
+cfg.initial_member_count = 3;
 ```
 
-### 5.3 Attach the transport
-
-#### Option A — memory transport (in-process, for tests)
+### 5.3 Add the node to the cluster
 
 ```c
-/* All nodes must share the same raft_cluster_t. */
+my_state_t state = {0};
+raft_application_t app = my_make_app(&state);
+
+/* root_dir: the engine stores node state under {root_dir}/{node_id}/
+ * Pass NULL to disable persistence (useful in tests). */
+raft_node_t *node = raft_cluster_add_node(&cluster, &cfg,
+                                          "var/myapp",  /* root_dir */
+                                          &app,
+                                          10000);        /* tick period µs */
+```
+
+---
+
+## 6. Choosing a transport
+
+### 6.1 Memory transport (in-process — tests and simulations)
+
+All nodes share the same `raft_cluster_t`.  No threads, no network.
+
+```c
 node->transport = raft_mem_transport_make(node);
 ```
 
-#### Option B — TCP transport (multi-process)
+Use `raft_cluster_tick(cluster, dt_ms)` to drive time manually, which is
+convenient for deterministic tests:
+
+```c
+for (int i = 0; i < 100; ++i)
+    raft_cluster_tick(&cluster, 10);  /* simulate 1000 ms */
+```
+
+### 6.2 TCP transport (multi-process — production)
+
+Each process hosts one node.  Include `raft/raft_tcp_transport.h` and add
+`raft_tcp_transport.c` to your build (it is **not** in `libraft_rx.a`).
 
 ```c
 raft_tcp_transport_t tcp;
-raft_tcp_transport_init(&tcp, 5001);             /* listen port */
-raft_tcp_transport_set_self(&tcp, "n1", "127.0.0.1");
-raft_tcp_transport_set_data_dir(&tcp, "var/myapp/n1"); /* loads persisted peers */
 
-/* Add known peers (only needed on first run; saved automatically after that) */
+raft_tcp_transport_init(&tcp, 5001);                    /* 1. listen port       */
+raft_tcp_transport_set_self(&tcp, "n1", "127.0.0.1");   /* 2. own identity      */
+raft_tcp_transport_set_data_dir(&tcp, "var/myapp/n1");  /* 3. load peers.txt /  */
+                                                        /*    self.txt from disk */
+/* Only needed on first run — persisted automatically afterwards */
 raft_tcp_transport_add_peer(&tcp, "n2", "127.0.0.1", 5002);
 raft_tcp_transport_add_peer(&tcp, "n3", "127.0.0.1", 5003);
 
-raft_tcp_transport_start(&tcp);  /* starts the listener thread */
+raft_tcp_transport_start(&tcp);   /* 4. spawn listener thread */
 
-node->transport = raft_tcp_transport_make(&tcp);
+node->transport = raft_tcp_transport_make(&tcp);  /* 5. attach to node */
 ```
 
-#### Option C — custom transport
+Call order matters: `set_self` and `set_data_dir` must precede `start`.
 
-Implement the five-function vtable:
+Stop the transport after the event loop exits:
+
+```c
+raft_tcp_transport_stop(&tcp);
+```
+
+### 6.3 Custom transport
+
+Implement the five-function vtable and assign it to `node->transport`:
 
 ```c
 typedef struct {
@@ -377,229 +304,188 @@ typedef struct {
 } raft_transport_t;
 ```
 
-| Function | Called by | Purpose |
+| Function | Called by | Contract |
 |---|---|---|
-| `send` | Consensus engine | Send a Raft message to another node (by `msg->target`) |
-| `recv` | Consensus engine | Drain incoming Raft messages from the network |
-| `submit_command` | Your client code | Enqueue a client command for the leader to apply |
-| `recv_commands` | Consensus engine (leader) | Drain pending client commands |
-| `set_enabled` | `raft_node_stop/start` | Gate the transport on simulated failures (optional) |
+| `send` | Engine | Deliver `msg` to the node identified by `msg->target`; return 0 on success |
+| `recv` | Engine | Copy at most `capacity` incoming messages into `out`; return count |
+| `submit_command` | Your client code | Enqueue `cmd` for the leader to process; return 0 on success |
+| `recv_commands` | Engine (leader only) | Drain at most `capacity` pending commands into `out`; return count |
+| `set_enabled` | `raft_node_stop` / `raft_node_start` | Gate the transport; pass NULL if you do not need simulated failures |
 
-`send` and `recv` carry Raft protocol messages (`raft_message_t`).  
-`submit_command` / `recv_commands` carry application-level commands (`raft_command_t`).
+`send` / `recv` carry `raft_message_t` (Raft protocol messages).  
+`submit_command` / `recv_commands` carry `raft_command_t` (application commands).
 
-### 5.4 Run the event loop
+---
 
-`raft_rx` runs inside the `rxnet` cooperative executor — a single-threaded
-poll loop that ticks all registered FSMs in turn:
+## 7. Running the event loop
+
+Raft nodes are `rx_fsm_machine` instances driven by an rxnet executor.  Pick
+the executor that fits your application:
+
+### 7.1 Cooperative executor
+
+Single-threaded, polls continuously, sleeps between ticks.  Simplest option.
 
 ```c
+#include "rxnet/coop.h"
+
 rx_coop_exec ce;
 rx_coop_exec_init(&ce);
 rx_coop_exec_add(&ce, &runtime.runtime);
-
-rx_coop_exec_run(&ce);  /* blocks until all machines exit */
+rx_coop_exec_run(&ce);   /* blocks until stopped */
 ```
 
-The executor calls each FSM at the configured tick interval (`period_us` in
-`raft_cluster_add_node`).  The default is 10 000 µs (10 ms); tune it to be
-≤ `heartbeat_interval_ms / 2` in practice.
+### 7.2 Cyclic executive
 
-> **Threading model**: There is exactly one compute thread (the one calling
-> `rx_coop_exec_run`).  The TCP listener runs in a separate OS thread, but it
-> only appends to mutex-protected queues.  All Raft logic, `apply`, and your
-> application callbacks execute on the single compute thread.
+Fixed-period scheduling driven by a sleep-until timer.  Drop-in replacement
+for `rx_coop_exec`; the period is read from each machine's `period_us`.
 
-### 5.5 Submit commands
+```c
+#include "rxnet/cyclic.h"
 
-Commands must reach the **leader** to be committed.  With the memory transport
-(single process) you can find the leader directly:
+rx_cyclic_exec ce;
+rx_cyclic_exec_init(&ce);
+rx_cyclic_exec_add(&ce, &runtime.runtime);
+rx_cyclic_exec_run(&ce);
+```
+
+### 7.3 Thread executor
+
+One pthread per FSM node, synchronised with BSP barriers (latch / evaluate /
+commit phases run in lock-step across all threads).  Suitable when the Raft
+FSM and other FSMs should run in parallel.
+
+```c
+#include "rxnet/thread.h"
+
+rx_thread_exec te;
+rx_thread_exec_init(&te);
+rx_thread_exec_add(&te, &runtime.runtime);
+rx_thread_exec_run(&te);   /* last node of last runtime stays on main thread */
+```
+
+> With the TCP transport all shared mutable state between the listener thread
+> and the compute thread is already protected by a mutex, so the thread
+> executor is safe to use.
+
+---
+
+## 8. Submitting commands
+
+Commands must reach the **leader** to be committed.
+
+**Memory transport** — find the leader directly and submit:
 
 ```c
 raft_node_t *leader = raft_cluster_leader(&cluster);
 if (leader) {
     raft_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    strncpy(cmd.op,    "inc",  sizeof(cmd.op)    - 1);
-    strncpy(cmd.value, "1",    sizeof(cmd.value)  - 1);
+    strncpy(cmd.op,    "inc", sizeof(cmd.op)    - 1);
+    strncpy(cmd.value, "1",   sizeof(cmd.value)  - 1);
     raft_node_submit_command(leader, &cmd);
 }
 ```
 
-With the TCP transport the command is submitted to the transport's command
-queue and drained by the leader's FSM on the next tick:
+**TCP transport** — enqueue into the transport; the leader drains it on the
+next tick:
 
 ```c
-/* On the leader node (or any node that forwards to the leader): */
 raft_command_t cmd;
 memset(&cmd, 0, sizeof(cmd));
-strncpy(cmd.op, "inc", sizeof(cmd.op) - 1);
-strncpy(cmd.value, "1", sizeof(cmd.value) - 1);
+strncpy(cmd.op,    "inc", sizeof(cmd.op)    - 1);
+strncpy(cmd.value, "1",   sizeof(cmd.value)  - 1);
 node->transport.submit_command(node->transport.ctx, &cmd);
 ```
 
-### 5.6 Complete minimal example
+Commands submitted to a follower are silently dropped; the application is
+responsible for directing commands to the leader (or forwarding them).
 
-The snippet below is a self-contained in-process 3-node cluster:
+---
+
+## 9. Membership changes
+
+### 9.1 Adding a node
+
+A joining node sets `cfg.learner = 1` (prevents it from auto-bootstrapping a
+solo cluster) and leaves `initial_member_count = 0`.  With the TCP transport,
+it calls `raft_tcp_transport_request_join` once at startup to contact any one
+existing member (the *introducer*):
 
 ```c
-#include "raft/raft.h"
-#include "rxnet/fsm.h"
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+cfg.learner = 1;
+/* no initial_members */
 
-/* ── Application ─────────────────────────────────────────────────────────── */
-
-typedef struct { int counter; } counter_state_t;
-
-static void on_apply(void *u, const raft_command_t *cmd) {
-    counter_state_t *s = u;
-    if (strcmp(cmd->op, "inc") == 0) s->counter += atoi(cmd->value);
-}
-static void on_reload(void *u)                              { ((counter_state_t *)u)->counter = 0; }
-static size_t on_snapshot(void *u, void *buf, size_t sz)   {
-    return (size_t)snprintf(buf, sz, "%d\n", ((counter_state_t *)u)->counter);
-}
-static void on_restore(void *u, const void *buf, size_t sz) {
-    (void)sz; ((counter_state_t *)u)->counter = atoi(buf);
-}
-
-static raft_application_t make_app(counter_state_t *s) {
-    raft_application_t a = { on_apply, on_reload, on_snapshot, on_restore, s };
-    return a;
-}
-
-/* ── Bootstrap helper ────────────────────────────────────────────────────── */
-
-static raft_node_config_t node_cfg(const char *id, const char *p1, const char *p2) {
-    raft_node_config_t c;
-    memset(&c, 0, sizeof(c));
-    strncpy(c.node_id, id, RAFT_MAX_ID - 1);
-    strncpy(c.peers[0], p1, RAFT_MAX_ID - 1);
-    strncpy(c.peers[1], p2, RAFT_MAX_ID - 1);
-    c.peer_count = 2;
-    strncpy(c.initial_members[0], "n1", RAFT_MAX_ID - 1);
-    strncpy(c.initial_members[1], "n2", RAFT_MAX_ID - 1);
-    strncpy(c.initial_members[2], "n3", RAFT_MAX_ID - 1);
-    c.initial_member_count  = 3;
-    c.election_timeout_ms   = 150;
-    c.heartbeat_interval_ms = 50;
-    return c;
-}
-
-/* ── main ────────────────────────────────────────────────────────────────── */
-
-int main(void) {
-    rx_fsm_runtime   runtime;
-    raft_cluster_t   cluster;
-    counter_state_t  state[3] = {{0}, {0}, {0}};
-    raft_application_t apps[3];
-    raft_node_config_t cfgs[3];
-    raft_node_t *leader;
-    raft_command_t cmd;
-    size_t i;
-
-    rx_fsm_runtime_init(&runtime, 3);
-    raft_cluster_init(&cluster, &runtime);
-
-    cfgs[0] = node_cfg("n1", "n2", "n3");
-    cfgs[1] = node_cfg("n2", "n1", "n3");
-    cfgs[2] = node_cfg("n3", "n1", "n2");
-
-    for (i = 0; i < 3; ++i) {
-        apps[i] = make_app(&state[i]);
-        raft_node_t *n = raft_cluster_add_node(&cluster, &cfgs[i],
-                                               NULL /*no persistence*/, &apps[i], 0);
-        n->transport = raft_mem_transport_make(n);
-    }
-
-    /* Simulate 800 ms of wall time in 10 ms ticks */
-    for (i = 0; i < 80; ++i)
-        raft_cluster_tick(&cluster, 10);
-
-    leader = raft_cluster_leader(&cluster);
-    if (!leader) { fputs("no leader\n", stderr); return 1; }
-    printf("leader: %s\n", leader->config.node_id);
-
-    /* Submit a command */
-    memset(&cmd, 0, sizeof(cmd));
-    strncpy(cmd.op, "inc", sizeof(cmd.op) - 1);
-    strncpy(cmd.value, "42", sizeof(cmd.value) - 1);
-    raft_node_submit_command(leader, &cmd);
-
-    for (i = 0; i < 20; ++i)
-        raft_cluster_tick(&cluster, 10);
-
-    printf("counter on n1: %d\n", state[0].counter);  /* → 42 */
-
-    raft_cluster_destroy(&cluster);
-    rx_fsm_runtime_free(&runtime);
-    return 0;
-}
+/* After attaching the transport: */
+raft_tcp_transport_request_join(&tcp,
+    "n4", "127.0.0.1", 5004,   /* this node's identity */
+    "127.0.0.1", 5001);         /* introducer address   */
 ```
 
-Compile with:
+The join protocol runs automatically:
 
-```bash
-cc -std=c99 -Ic/include -Irxnet/c/include \
-   my_app.c c/build/libraft_rx.a rxnet/c/build/librxnet.a -o my_app
+```
+n4  ──(join-request)──────────────────────► n1
+n1  ──(flood: forwarded join-request)──────► n2, n3
+n1, n2, n3  ──(announce-self)─────────────► n4
+leader appends enter_joint / leave_joint to log
+n4 is a full voting member once leave_joint commits
+```
+
+Existing nodes do **not** need reconfiguration.
+
+### 9.2 Removing a node
+
+Call `raft_node_request_membership_change` on the leader, passing the **target
+full membership list** (not a delta):
+
+```c
+/* Remove n4: new membership is {n1, n2, n3} */
+char new_members[3][RAFT_MAX_ID] = {"n1", "n2", "n3"};
+raft_node_request_membership_change(leader_node, new_members, 3);
+```
+
+To remove the current node itself, exclude its own ID from the list.  The
+engine runs joint consensus automatically; the removed node stops once the
+final configuration commits.
+
+### 9.3 Joint consensus internals
+
+Membership changes use the two-phase joint consensus approach from the Raft
+paper.
+
+**Phase 1 — enter joint**: the leader appends a `cluster.enter_joint` log
+entry encoding both old and new member sets.  While this entry is not yet
+committed, quorum requires a majority from **both** sets.
+
+**Phase 2 — leave joint**: once all new members have caught up and
+`enter_joint` is committed, the leader appends `cluster.leave_joint`.  The
+cluster transitions to the new stable configuration.
+
+```
+log: … | enter_joint [old={n1,n2,n3}, new={n1,n2,n3,n4}] | … | leave_joint [new={n1,n2,n3,n4}] | …
 ```
 
 ---
 
-## 6. TCP transport
+## 10. TCP transport — persistence
 
-`raft_tcp_transport_t` provides a production-grade TCP transport for
-multi-process clusters.  Include `raft/raft_tcp_transport.h` and link with
-`raft_tcp_transport.c` and `-lpthread`.
+### Peer table (`peers.txt`)
 
-### 6.1 Initialization
-
-```c
-raft_tcp_transport_t tcp;
-
-/* 1. Init with listen port (0 = don't listen yet) */
-raft_tcp_transport_init(&tcp, 5001);
-
-/* 2. Identify this node (used in self-announcements during join) */
-raft_tcp_transport_set_self(&tcp, "n1", "127.0.0.1");
-
-/* 3. Set data directory — loads persisted peers.txt and self.txt from disk */
-raft_tcp_transport_set_data_dir(&tcp, "var/myapp/n1");
-
-/* 4. Add initial peers (skip on restart; they are loaded from peers.txt) */
-raft_tcp_transport_add_peer(&tcp, "n2", "127.0.0.1", 5002);
-raft_tcp_transport_add_peer(&tcp, "n3", "127.0.0.1", 5003);
-
-/* 5. Start the listener thread */
-raft_tcp_transport_start(&tcp);
-
-/* 6. Create the vtable that raft_node_t will use */
-node->transport = raft_tcp_transport_make(&tcp);
-```
-
-Call order matters: `set_self` and `set_data_dir` must come before
-`start`.
-
-### 6.2 Peer persistence
-
-Every time a peer is added (via `raft_tcp_transport_add_peer` or through the
-join protocol), the full peer table is written atomically to
-`{data_dir}/peers.txt`.  Format:
+Every time a peer is registered — via `raft_tcp_transport_add_peer` or through
+the join protocol — the full peer table is written atomically to
+`{data_dir}/peers.txt`:
 
 ```
 n2 127.0.0.1 5002
 n3 127.0.0.1 5003
 ```
 
-On the next startup `raft_tcp_transport_set_data_dir` reloads the table, so
-`--peer` flags are not needed after the first run.
+`set_data_dir` reloads this file at startup, so peer addresses do not need to
+be supplied again after the first run.  `add_peer` deduplicates by node ID:
+adding the same ID with a new address updates the entry and rewrites the file.
 
-`add_peer` deduplicates by node ID: if the same ID is added again with a
-different address, the entry is updated and the file is rewritten.
-
-### 6.3 Self persistence
+### Own address (`self.txt`)
 
 `raft_tcp_transport_start` writes `{data_dir}/self.txt`:
 
@@ -607,177 +493,35 @@ different address, the entry is updated and the file is rewritten.
 127.0.0.1 5001
 ```
 
-On restart, `set_data_dir` reads this file and fills in `own_host` and
-`listen_port` if they are not already set.  This means `--port` and `--host`
-flags are also optional after the first run.
+`set_data_dir` reads it at startup and fills in `own_host` and `listen_port`
+if they are not already set by the caller.  Priority (highest wins):
 
-Priority (highest to lowest):
+1. Explicit value passed by the caller (`init` port, `set_self` host)
+2. Values read from `self.txt`
+3. Defaults (`127.0.0.1`, port 0 — no listening)
 
-1. Explicit `--port` / `--host` command-line argument
-2. Values in `self.txt`
-3. Defaults (`127.0.0.1`, no port)
-
-### 6.4 The listener thread
-
-`raft_tcp_transport_start` spawns a single background thread that accepts
-connections, reads framed messages, and appends them to mutex-protected
-in-memory queues (`in_queue`, `join_queue`, `cmd_queue`, `fwd_cmd_queue`).
-
-The rxnet compute thread drains these queues each tick by calling the
-transport vtable's `recv` and `recv_commands` functions — no callbacks or
-locking is needed in application code.
-
-Tear down with `raft_tcp_transport_stop(&tcp)` after the event loop exits.
+All writes use an atomic write-to-temp / rename pattern so a crash mid-write
+never corrupts the live file.
 
 ---
 
-## 7. Cluster lifecycle
-
-### 7.1 Bootstrap a fresh cluster
-
-A **fresh** cluster starts with no data on disk.  Every node needs:
-
-- `--id NAME` — unique node identifier (max 15 chars)
-- `--port PORT` — TCP listen port
-- `--member ID` × N — the IDs of **all** initial members (same on every node)
-- `--peer ID=HOST:PORT` × N-1 — address of each other node
-
-All nodes that are part of the initial cluster must declare **identical**
-`--member` lists.  Once enough nodes are running (≥ ⌊N/2⌋ + 1), a leader is
-elected and the cluster is operational.
-
-Example — 3-node cluster:
-
-```bash
-./raft_node --id n1 --port 5001 \
-  --member n1 --member n2 --member n3 \
-  --peer n2=127.0.0.1:5002 --peer n3=127.0.0.1:5003
-
-./raft_node --id n2 --port 5002 \
-  --member n1 --member n2 --member n3 \
-  --peer n1=127.0.0.1:5001 --peer n3=127.0.0.1:5003
-
-./raft_node --id n3 --port 5003 \
-  --member n1 --member n2 --member n3 \
-  --peer n1=127.0.0.1:5001 --peer n2=127.0.0.1:5002
-```
-
-### 7.2 Restarting a node
-
-After the first run, all state lives on disk.  Restart with only:
-
-```bash
-./raft_node --id n1
-```
-
-The node loads term, log, snapshot, membership, peers, port, and host from
-`{data_dir}/n1/`.  No other flags are needed.
-
-**What happens internally**:
-
-1. `raft_storage_node_load` restores term, log, snapshot, and membership.
-2. `raft_tcp_transport_set_data_dir` reloads `peers.txt` and `self.txt`.
-3. The node starts as a follower with an **extended** initial election timeout
-   (`election_timeout + random + 2 × election_timeout`).  This gives the
-   existing leader time to send heartbeats and prevents a spurious election.
-4. On receiving the first heartbeat the node rejoins the cluster normally.
-
-> The cluster **does not need to be stopped** to restart a single node.  A
-> 3-node cluster tolerates one failed node while remaining fully operational.
-
-### 7.3 Adding a node (`--join`)
-
-A new node does not need `--member` or `--peer` — it only needs to contact
-one existing member (the *introducer*):
-
-```bash
-./raft_node --id n4 --port 5004 --join 127.0.0.1:5001
-```
-
-**Join protocol**:
-
-```
-n4 ──(join-request)──► n1 (introducer)
-n1 ──(flood: join-request, forwarded)──► n2, n3
-n1, n2, n3 ──(announce-self)──► n4
-n4 adds n1, n2, n3 as TCP peers
-leader applies membership change via Raft log
-```
-
-1. n4 sends its ID, host, and port to the introducer (n1).
-2. n1 floods the request to all its peers with `forwarded=1` (prevents loops).
-3. Every existing node adds n4 as a TCP peer and sends n4 a self-announcement.
-4. n4 now knows the address of every member.
-5. The current leader appends a joint-consensus entry to the log; once it
-   commits, n4 is a full voting member.
-
-Existing nodes **do not need reconfiguration** to accept a new member.
-
-### 7.4 Removing a node
-
-Run `rmnode ID` on the leader's CLI, or call the API directly:
-
-```c
-char new_members[3][RAFT_MAX_ID] = {"n1", "n2", "n3"};
-raft_node_request_membership_change(leader, new_members, 3);
-```
-
-Pass the **new full membership list** (the target state, not the delta).
-The engine runs joint consensus automatically and shuts down the removed node
-once the final configuration commits.
-
-To remove the current node itself, use `leave` on the CLI or call
-`raft_node_request_membership_change` with a list that excludes `node_id`.
-
----
-
-## 8. Membership changes internals
-
-`raft_rx` uses the **joint consensus** approach from the Raft paper.  A
-membership change proceeds in two log-appended phases:
-
-### Phase 1 — enter joint
-
-The leader appends a `cluster.enter_joint` entry encoding both the old and new
-member sets.  While this entry is not yet committed, quorum requires a majority
-of **both** the old and new sets.
-
-```
-log: … | enter_joint [old={n1,n2,n3}, new={n1,n2,n3,n4}] | …
-```
-
-### Phase 2 — leave joint
-
-Once every new member has caught up (replicated the full log) and the
-`enter_joint` entry is committed, the leader appends `cluster.leave_joint`.
-This finalises the configuration to just `new_members`.
-
-```
-log: … | enter_joint [...] | … | leave_joint [new={n1,n2,n3,n4}] | …
-```
-
-The configuration is stored in `meta.txt` and replayed on restart — no
-external state is needed.
-
----
-
-## 9. Persistence and storage format
+## 11. Persistence and storage format
 
 Each node stores its state under `{root_dir}/{node_id}/`:
 
 ```
 var/myapp/
 └── n1/
-    ├── meta.txt        Raft durable state
-    ├── log.txt         Uncommitted / recent log entries
-    ├── snapshot.bin    Compacted application snapshot
-    ├── peers.txt       Known TCP peer addresses  (TCP transport only)
-    └── self.txt        Own host and port         (TCP transport only)
+    ├── meta.txt        Raft durable state (term, voted_for, config, …)
+    ├── log.txt         Log entries not yet compacted into a snapshot
+    ├── snapshot.bin    Compacted application state
+    ├── peers.txt       Known TCP peer addresses   (TCP transport only)
+    └── self.txt        Own host and listen port   (TCP transport only)
 ```
 
 ### `meta.txt`
 
-Plain text, one field per line:
+Plain text, one `key value` pair per line:
 
 ```
 current_term 7
@@ -796,83 +540,72 @@ new_count 0
 
 ### `log.txt`
 
-One entry per line, pipe-delimited:
+One entry per line, pipe-delimited `index|term|op|key|value`:
 
 ```
-index|term|op|key|value
 11|4|set|foo|bar
 12|4|del|old|-
 13|7|cluster.enter_joint|members|n1,n2,n3,n4
+14|7|cluster.leave_joint|members|n1,n2,n3,n4
 ```
 
 ### `snapshot.bin`
 
-Binary: `[int32 index][int32 term][int32 size][<size> bytes of app data]`
+Binary: `[int32 index][int32 term][int32 size][<size> bytes of application data]`
 
-### `peers.txt` / `self.txt` (TCP transport)
-
-```
-# peers.txt
-n2 127.0.0.1 5002
-n3 127.0.0.1 5003
-
-# self.txt
-127.0.0.1 5001
-```
-
-Writes are **atomic** (write to `.tmp`, then `rename`) so a crash mid-write
-never corrupts the current file.
+The application data is whatever your `snapshot` callback writes.  The engine
+validates `index` and `term` on load before passing the bytes to
+`restore_snapshot`.
 
 ---
 
-## 10. Configuration reference
+## 12. Configuration reference
 
 ### `raft_node_config_t`
 
 | Field | Type | Description |
 |---|---|---|
 | `node_id` | `char[RAFT_MAX_ID]` | Unique node name (max 15 chars) |
-| `peers` | `char[RAFT_MAX_PEERS][RAFT_MAX_ID]` | IDs of other nodes |
-| `peer_count` | `size_t` | Number of entries in `peers` |
-| `initial_members` | `char[RAFT_MAX_NODES][RAFT_MAX_ID]` | All nodes in the initial cluster |
-| `initial_member_count` | `size_t` | Number of initial members |
-| `learner` | `int` | `1` for a joining node (skips auto-bootstrap) |
-| `election_timeout_ms` | `int` | Base election timeout in ms |
-| `heartbeat_interval_ms` | `int` | Leader heartbeat interval in ms |
+| `peers` / `peer_count` | `char[][RAFT_MAX_ID]` / `size_t` | IDs of the other nodes |
+| `initial_members` / `initial_member_count` | `char[][RAFT_MAX_ID]` / `size_t` | IDs of all nodes in the initial cluster |
+| `learner` | `int` | `1` for a joining node — skips auto-bootstrap |
+| `election_timeout_ms` | `int` | Base follower election timeout |
+| `heartbeat_interval_ms` | `int` | Leader heartbeat interval |
 
 ### Timing guidelines
 
 | Parameter | Recommended | Minimum | Notes |
 |---|---|---|---|
-| `election_timeout_ms` | 500 ms | ~3 × RTT | Too small → spurious elections; too large → slow failover |
-| `heartbeat_interval_ms` | 100 ms | ~RTT | Must be much less than `election_timeout_ms`; rule of thumb: ≤ 1/5 |
-| tick interval (`period_us`) | 10 000 µs | — | Should be ≤ `heartbeat_interval_ms × 1000 / 2` |
+| `election_timeout_ms` | 500 ms | 3–5 × RTT | Too small: spurious elections; too large: slow failover |
+| `heartbeat_interval_ms` | 100 ms | ~RTT | Rule of thumb: at most 1/5 of `election_timeout_ms` |
+| tick `period_us` | 10 000 µs | — | Keep at most `heartbeat_interval_ms × 1000 / 2` |
 
-### Restarting node election delay
+### Restart behaviour
 
-When a node with `current_term > 0` on disk restarts it gets an extra
-`2 × election_timeout_ms` added to its first election deadline.  This gives
-the existing leader time to establish heartbeats before the restarting node
-launches an election.
+A node that has `current_term > 0` on disk (i.e. has participated in at least
+one election) gets an extra `2 × election_timeout_ms` added to its first
+election deadline.  This window gives the existing leader time to send
+heartbeats before the restarting node launches a new election.
 
 ---
 
-## 11. Limits reference
+## 13. Limits reference
 
-| Constant | Default | Meaning |
-|---|---|---|
-| `RAFT_MAX_NODES` | 8 | Maximum nodes per cluster |
-| `RAFT_MAX_PEERS` | 7 | Maximum peers per node (`RAFT_MAX_NODES - 1`) |
-| `RAFT_MAX_ID` | 16 | Maximum length of a node ID (including `\0`) |
-| `RAFT_MAX_LOG` | 128 | Maximum log entries before compaction is mandatory |
-| `RAFT_MAX_QUEUE` | 256 | Message queue size (per node, per direction) |
-| `RAFT_MAX_BATCH` | 16 | Maximum entries per `AppendEntries` RPC |
-| `RAFT_MAX_KEY` | 64 | Maximum key length in `raft_command_t` |
-| `RAFT_MAX_VALUE` | 128 | Maximum value length in `raft_command_t` |
-| `RAFT_MAX_SNAPSHOT_SIZE` | 4096 | Snapshot buffer size; override before `#include "raft/raft.h"` |
-| `RAFT_KV_MAX_PAIRS` | 128 | Maximum key-value pairs in the built-in KV app |
+| Constant | Default | Override? | Meaning |
+|---|---|---|---|
+| `RAFT_MAX_NODES` | 8 | Yes | Maximum nodes per cluster |
+| `RAFT_MAX_PEERS` | 7 | Yes | Maximum peers per node (= `RAFT_MAX_NODES - 1`) |
+| `RAFT_MAX_ID` | 16 | Yes | Node ID buffer size including `\0` |
+| `RAFT_MAX_LOG` | 128 | Yes | Log entries kept before compaction is forced |
+| `RAFT_MAX_QUEUE` | 256 | Yes | Message queue depth (per node, per direction) |
+| `RAFT_MAX_BATCH` | 16 | Yes | Max entries per `AppendEntries` RPC |
+| `RAFT_MAX_KEY` | 64 | Yes | `raft_command_t.key` buffer size |
+| `RAFT_MAX_VALUE` | 128 | Yes | `raft_command_t.value` buffer size |
+| `RAFT_MAX_SNAPSHOT_SIZE` | 4096 | Yes | Snapshot buffer in bytes |
+| `RAFT_KV_MAX_PAIRS` | 128 | Yes | Pairs in the built-in KV application |
 
-All constants can be overridden at compile time:
+Override any constant before including `raft.h`, consistently across all
+translation units:
 
 ```c
 #define RAFT_MAX_NODES 16
@@ -882,22 +615,14 @@ All constants can be overridden at compile time:
 
 ---
 
-## 12. Building
+## 14. Building
 
-### Library only
-
-```bash
-make -C c build/libraft_rx.a
-```
-
-### With rxnet tracing enabled
+### Library
 
 ```bash
-make -C c build/libraft_rx_trace.a
+make -C c build/libraft_rx.a          # standard build
+make -C c build/libraft_rx_trace.a    # with rxnet tracing (-DRX_TRACE_ENABLE)
 ```
-
-The trace variant compiles with `-DRX_TRACE_ENABLE` and produces a
-`trace.bin` readable by the rxnet trace viewer.
 
 ### Linking your application
 
@@ -909,56 +634,243 @@ $(TARGET): $(SRC) $(LIBS)
 	$(CC) -std=c99 -O2 $(INCLUDES) -o $@ $(SRC) $(LIBS)
 ```
 
-The TCP transport (`raft_tcp_transport.c`) and the KV application
-(`raft_kv_app.c`) are **not** compiled into `libraft_rx.a`; include their
-`.c` files directly in your build if you use them (see the demo app
-`Makefile` for a complete example).
+`libraft_rx.a` contains `raft.c`, `raft_transport.c`, and `raft_storage.c`.
+The following are **not** included and must be compiled directly into your
+binary if you use them:
+
+| File | When needed |
+|---|---|
+| `src/raft_tcp_transport.c` | When using the TCP transport |
+| `src/raft_kv_app.c` | When using the built-in key-value application |
+
+### Minimal example
+
+```bash
+cc -std=c99 -O2 \
+   -Ic/include -Irxnet/c/include \
+   my_app.c \
+   c/build/libraft_rx.a rxnet/c/build/librxnet.a \
+   -o my_app
+```
 
 ---
 
-## 13. Troubleshooting
+## 15. Troubleshooting
 
 ### No leader elected after startup
 
-- Check that all nodes declare the **same** `--member` list.
-- Check that `--peer` addresses are reachable and the ports are open.
-- Verify that `election_timeout_ms` is at least 3–5× the round-trip latency.
+- Verify that all nodes declare the **same** `initial_members` list.
+- Check that peer addresses are reachable and ports are open.
+- Ensure `election_timeout_ms` is at least 3–5 × the round-trip latency.
 
-### Node restarts with `running=no` (does not rejoin)
+### Compaction / snapshot
 
-This can happen if a node that originally joined via `--join` is restarted
-with an incorrect membership override.  The fix is already baked in: a node
-with log entries on disk **never** applies the `initial_members` fallback; it
-always replays membership from the log.  If you see this symptom, check that
-you are not accidentally passing `--member` flags on restart.
-
-### Leader lost after restarting two nodes sequentially
-
-A restarting node with a stale term on disk may start a new election before the
-existing leader can send a heartbeat, disrupting the cluster.  The extended
-election timeout (§10) mitigates this.  If it still occurs, increase
-`election_timeout_ms` or reduce the time between restarts.
+Compaction triggers automatically when the log reaches
+`compaction_threshold` entries (default: `RAFT_MAX_LOG = 128`).  The engine
+calls `snapshot`, writes `snapshot.bin`, and truncates `log.txt`.  Verify that
+your `snapshot` callback serialises **all** state, otherwise a restart after
+compaction will miss entries that were already compacted.
 
 ### `raft_cluster_add_node` returns NULL
 
-- Cluster is already at `RAFT_MAX_NODES` capacity.
+- The cluster is already at `RAFT_MAX_NODES` capacity.
 - The data directory cannot be created (check permissions).
 
-### Log grows without compaction
+---
 
-Compaction triggers automatically when `log_count >= compaction_threshold`
-(default: `RAFT_MAX_LOG = 128`).  The engine calls `snapshot` on your
-application, writes `snapshot.bin`, and truncates `log.txt`.  Ensure your
-`snapshot` callback serialises all state correctly, otherwise a restart will
-lose data.
+# Part II — The Demo Application
 
-### Custom snapshot size
+---
 
-If your application state exceeds 4096 bytes, override the constant:
+## 16. Overview
 
-```c
-#define RAFT_MAX_SNAPSHOT_SIZE (64 * 1024)
-#include "raft/raft.h"
+`c/examples/demo_app` is a **worked example** that shows how to build a
+multi-process Raft cluster using `raft_rx`.  It implements a replicated
+key-value store with a readline CLI.
+
+It is **one possible application** of the library, not the library itself.
+Read Part I to understand the underlying API; read this part to see it in
+action and to use the `raft_node` binary for experimentation.
+
+### What the demo app adds on top of raft_rx
+
+| Concern | How the demo app handles it |
+|---|---|
+| State machine | Built-in key-value store (`raft_kv_app`) |
+| Transport | TCP (`raft_tcp_transport`) |
+| Executor | `rx_coop_exec` (cooperative, single thread) |
+| Command routing | Follower forwards commands to leader via TCP |
+| CLI | `rx_fsm_machine` on the same runtime as the Raft node |
+| Argument parsing | Custom `--id`, `--port`, `--member`, `--peer`, `--join` flags |
+
+### Source layout
+
+```
+c/examples/demo_app/
+├── Makefile
+├── README.md
+└── src/
+    ├── main.c      argument parsing, setup, rx_coop_exec_run
+    ├── cli_fsm.h   CLI state definition
+    └── cli_fsm.c   CLI FSM implementation
 ```
 
-Do this consistently in every translation unit that includes `raft.h`.
+---
+
+## 17. Building
+
+```bash
+make -C c/examples/demo_app
+# Result: c/examples/demo_app/build/raft_node
+```
+
+---
+
+## 18. Starting a fresh cluster
+
+All nodes in the initial cluster must agree on the same member list.  Provide
+`--member ID` once per node and `--peer ID=HOST:PORT` for every other node.
+
+```bash
+# Terminal 1
+./build/raft_node --id n1 --port 5001 \
+  --member n1 --member n2 --member n3 \
+  --peer n2=127.0.0.1:5002 --peer n3=127.0.0.1:5003
+
+# Terminal 2
+./build/raft_node --id n2 --port 5002 \
+  --member n1 --member n2 --member n3 \
+  --peer n1=127.0.0.1:5001 --peer n3=127.0.0.1:5003
+
+# Terminal 3
+./build/raft_node --id n3 --port 5003 \
+  --member n1 --member n2 --member n3 \
+  --peer n1=127.0.0.1:5001 --peer n2=127.0.0.1:5002
+```
+
+After ~1 s a leader is elected.
+
+---
+
+## 19. Restarting a node
+
+All state (term, log, snapshot, peers, port, host) is persisted under
+`var/raft/{id}/` after the first run.  Restart with only `--id`:
+
+```bash
+./build/raft_node --id n1
+```
+
+The cluster does **not** need to be stopped.  A 3-node cluster tolerates one
+offline node and stays fully operational while it restarts.
+
+---
+
+## 20. Adding a node
+
+The joining node contacts any one existing member (`--join HOST:PORT`).  It
+does **not** need `--member` or `--peer`:
+
+```bash
+./build/raft_node --id n4 --port 5004 --join 127.0.0.1:5001
+```
+
+The introducer floods the request to all peers, each peer announces itself to
+the new node, and the leader applies the membership change via Raft.  Existing
+nodes require no reconfiguration.
+
+---
+
+## 21. Removing a node
+
+Use `rmnode` on whichever node is the current leader, or `leave` on the node
+that wants to exit:
+
+```
+n1> rmnode n4    # remove n4 (any node can issue this; only the leader acts)
+n4> leave        # n4 removes itself
+```
+
+---
+
+## 22. CLI reference
+
+### Key-value commands
+
+| Command | Description |
+|---|---|
+| `set KEY VALUE` | Replicated write — forwarded to the leader automatically if this node is a follower |
+| `get KEY` | Read from the **local** KV state (no consensus required) |
+| `delete KEY` | Replicated delete — forwarded to the leader if needed |
+
+### Cluster inspection
+
+| Command | Description |
+|---|---|
+| `status` | Role, term, leader ID, commit index, log size, per-peer match index (leader only) |
+| `leader` | Current leader node ID |
+| `members` | Membership configuration — `stable` or `joint [old] [new]` |
+| `log` | Full Raft log with `COMMITTED` / `UNCOMMITTED` markers per entry |
+
+### Cluster management
+
+| Command | Who can run it | Description |
+|---|---|---|
+| `addnode ID` | Any node | Add `ID` to the cluster; forwarded to the leader automatically |
+| `rmnode ID` | Any node | Remove `ID` from the cluster; forwarded to the leader automatically |
+| `leave` | Any node | This node removes itself; forwarded to the leader if needed, then exits |
+| `join HOST:PORT` | Any node | If currently a member, leaves first; then joins the cluster via the node at `HOST:PORT` as introducer (equivalent to `--join` at startup, but usable at runtime) |
+| `merge HOST:PORT` | Any node | **Cluster merge** — see below |
+| `port PORT` | Any node | Start listening on `PORT` (useful when the node was started without `--port`) |
+
+### Fault injection
+
+| Command | Description |
+|---|---|
+| `stop` | Halts Raft processing on this node (simulates a crash without killing the process) |
+| `start` | Resumes after `stop` |
+
+### `merge HOST:PORT` — cluster merge protocol
+
+`merge` connects **two independent clusters** into one.  It is fundamentally
+different from `join`, which adds a single new node:
+
+- **`join`** — one node introduces itself to an existing cluster.
+- **`merge`** — this cluster introduces all of its members (with their TCP
+  addresses) to the node at `HOST:PORT`, which belongs to a different cluster.
+
+**Protocol** (initiated by running `merge HOST:PORT` on any node of cluster A):
+
+```
+A (any node)  ──(cluster-join frame: {A members + addresses})──► B (introducer)
+B             ──(flood cluster-join, forwarded)───────────────► B peers
+B, B peers    ──(cluster-join ANNOUNCE: {B members + addresses})► A nodes
+A leader      ──  membership_union(A+B) via Raft log  ────────► all
+B leader      ──  membership_union(A+B) via Raft log  ────────► all
+```
+
+1. The sender collects its full member list with TCP addresses and sends a
+   `cluster_join` frame to `HOST:PORT`.
+2. The receiving node floods the frame to all its own peers, and responds with
+   its own full member list.
+3. Both sides learn each other's TCP peers.
+4. Each cluster's leader computes the **union** of both member sets (`A + B`)
+   and initiates a joint-consensus membership change.
+5. The result is a single merged cluster containing all nodes from both.
+
+Use `merge` to join two previously independent clusters, or to reconnect a
+partitioned cluster after a network split is healed.
+
+---
+
+## 23. Command-line options
+
+| Option | First start | Restart | Description |
+|---|:-:|:-:|---|
+| `--id NAME` | Required | Required | Node identifier (max 15 chars) |
+| `--port PORT` | Required | Optional | TCP listen port; persisted in `self.txt` |
+| `--host HOST` | Optional | Optional | Advertised IP (default `127.0.0.1`) |
+| `--data DIR` | Optional | Optional | Data root directory (default `var/raft`) |
+| `--member ID` | Required | Omit | Initial cluster member (repeat N times) |
+| `--peer ID=HOST:PORT` | Required | Omit | Peer address (repeat N-1 times); persisted |
+| `--join HOST:PORT` | To join | — | Join an existing cluster via this introducer |

@@ -1,3 +1,6 @@
+// Copyright 2026 Jose M. Moya <jm.moya@upm.es>
+// SPDX-License-Identifier: MIT
+
 #include "raft/raft.h"
 #include "raft/raft_kv_app.h"
 #include "rxnet/fsm.h"

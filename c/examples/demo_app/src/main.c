@@ -1,3 +1,6 @@
+// Copyright 2026 Jose M. Moya <jm.moya@upm.es>
+// SPDX-License-Identifier: MIT
+
 /*
  * raft_node — single-node Raft/KV process.  The CLI is itself an FSM
  * registered on the same rxnet cooperative runtime as the Raft node, so
