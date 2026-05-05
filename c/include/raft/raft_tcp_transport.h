@@ -78,14 +78,29 @@ typedef struct {
     volatile int    shutdown;
 } raft_tcp_transport_t;
 
-void             raft_tcp_transport_init      (raft_tcp_transport_t *tcp, int port);
-void             raft_tcp_transport_add_peer  (raft_tcp_transport_t *tcp,
-                                               const char *id, const char *host, int port);
-int              raft_tcp_transport_start     (raft_tcp_transport_t *tcp);
-int              raft_tcp_transport_listen    (raft_tcp_transport_t *tcp, int port);
+/*
+ * Lifecycle
+ *
+ *  init          Zero-initialise and set the listen port (may be 0 if the
+ *                port will be loaded from self.txt via set_data_dir).
+ *  add_peer      Register a peer's address.  Deduplicates by id: if the same
+ *                id already exists the address is updated.  Saves peers.txt.
+ *  start         Start the listener thread and write self.txt.  Must be called
+ *                after set_self and set_data_dir.
+ *  listen        Start listening on a specific port (alternative to start).
+ *  is_listening  Returns 1 if the listener thread is running.
+ *  stop          Signal the listener thread to exit and join it.
+ *  make          Build the raft_transport_t vtable backed by this tcp state.
+ *                Assign the result to node->transport.
+ */
+void             raft_tcp_transport_init        (raft_tcp_transport_t *tcp, int port);
+void             raft_tcp_transport_add_peer    (raft_tcp_transport_t *tcp,
+                                                 const char *id, const char *host, int port);
+int              raft_tcp_transport_start       (raft_tcp_transport_t *tcp);
+int              raft_tcp_transport_listen      (raft_tcp_transport_t *tcp, int port);
 int              raft_tcp_transport_is_listening(const raft_tcp_transport_t *tcp);
-void             raft_tcp_transport_stop      (raft_tcp_transport_t *tcp);
-raft_transport_t raft_tcp_transport_make      (raft_tcp_transport_t *tcp);
+void             raft_tcp_transport_stop        (raft_tcp_transport_t *tcp);
+raft_transport_t raft_tcp_transport_make        (raft_tcp_transport_t *tcp);
 
 /*
  * Send a join-request frame to target_host:target_port announcing this node.
@@ -131,15 +146,20 @@ int raft_tcp_transport_forward_cmd(raft_tcp_transport_t *tcp,
 size_t raft_tcp_transport_recv_fwd_cmds(raft_tcp_transport_t *tcp,
                                          raft_command_t *out, size_t capacity);
 
-/* Store this node's own identity for use in self-announcements. */
-void raft_tcp_transport_set_self(raft_tcp_transport_t *tcp,
-                                  const char *node_id, const char *host);
-
 /*
- * Set the node-specific data directory and immediately load any previously
- * saved peers from {dir}/peers.txt.  Call before raft_tcp_transport_start.
- * Subsequent raft_tcp_transport_add_peer calls auto-save the updated table.
+ * set_self      Record this node's own id and advertised host so that
+ *               self-announcement frames (sent to joining nodes) carry the
+ *               correct address.  Must be called before start.
+ *
+ * set_data_dir  Set the node-specific data directory and immediately load:
+ *                 {dir}/peers.txt — known peer addresses (id host port per line)
+ *                 {dir}/self.txt  — own host and listen port
+ *               Values from these files fill in fields that are still zero/empty
+ *               (explicit --port / --host arguments take precedence).
+ *               Call before start.  Subsequent add_peer calls auto-save peers.txt.
  */
+void raft_tcp_transport_set_self    (raft_tcp_transport_t *tcp,
+                                     const char *node_id, const char *host);
 void raft_tcp_transport_set_data_dir(raft_tcp_transport_t *tcp, const char *dir);
 
 /*

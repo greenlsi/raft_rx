@@ -159,6 +159,63 @@ static rx_fsm_machine       g_cli_machine;
 static raft_node_t         *g_node = NULL;
 static cli_user_t           g_cli;
 
+typedef struct {
+    raft_application_t kv_app;
+    raft_kv_state_t *kv;
+    raft_tcp_transport_t *tcp;
+} demo_app_state_t;
+
+static demo_app_state_t g_app_state;
+
+static void demo_apply(void *user, const raft_command_t *command) {
+    demo_app_state_t *state = (demo_app_state_t *)user;
+    if (strcmp(command->op, "cluster.peer_set") == 0) {
+        char host[256];
+        int port;
+        if (parse_host_port(command->value, host, sizeof(host), &port) == 0 &&
+            strcmp(command->key, state->tcp->own_id) != 0) {
+            raft_tcp_transport_add_peer(state->tcp, command->key, host, port);
+        }
+        return;
+    }
+    if (state->kv_app.apply)
+        state->kv_app.apply(state->kv_app.user, command);
+}
+
+static void demo_reload(void *user) {
+    demo_app_state_t *state = (demo_app_state_t *)user;
+    if (state->kv_app.reload)
+        state->kv_app.reload(state->kv_app.user);
+}
+
+static size_t demo_snapshot(void *user, void *buf, size_t buf_size) {
+    demo_app_state_t *state = (demo_app_state_t *)user;
+    if (!state->kv_app.snapshot) return 0;
+    return state->kv_app.snapshot(state->kv_app.user, buf, buf_size);
+}
+
+static void demo_restore_snapshot(void *user, const void *buf, size_t size) {
+    demo_app_state_t *state = (demo_app_state_t *)user;
+    if (state->kv_app.restore_snapshot)
+        state->kv_app.restore_snapshot(state->kv_app.user, buf, size);
+}
+
+static raft_application_t demo_make_application(demo_app_state_t *state,
+                                                raft_kv_state_t *kv,
+                                                raft_tcp_transport_t *tcp) {
+    raft_application_t app;
+    state->kv = kv;
+    state->tcp = tcp;
+    state->kv_app = raft_kv_make_application(kv);
+    memset(&app, 0, sizeof(app));
+    app.apply = demo_apply;
+    app.reload = demo_reload;
+    app.snapshot = demo_snapshot;
+    app.restore_snapshot = demo_restore_snapshot;
+    app.user = state;
+    return app;
+}
+
 /* ── Setup ───────────────────────────────────────────────────────────────── */
 
 static void setup(const node_args_t *a) {
@@ -198,7 +255,7 @@ static void setup(const node_args_t *a) {
                 a->initial_members[i], RAFT_MAX_ID - 1);
 
     raft_kv_state_init(&g_kv);
-    app = raft_kv_make_application(&g_kv);
+    app = demo_make_application(&g_app_state, &g_kv, &g_tcp);
 
     g_node = raft_cluster_add_node(&g_cluster, &cfg, a->data_dir, &app, TICK_US);
     if (!g_node) { fputs("raft_cluster_add_node failed\n", stderr); exit(1); }

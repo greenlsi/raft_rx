@@ -95,6 +95,10 @@ make -C c build/raft_kv_cluster
 ./c/build/raft_kv_cluster
 ```
 
+Guía de usuario C (integración, ciclo de vida, referencia completa):
+
+- [`c/docs/user-guide.md`](c/docs/user-guide.md)
+
 Demo app C independiente (aplicación separada que consume `raft_rx`):
 
 ```bash

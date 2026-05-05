@@ -72,13 +72,32 @@ typedef struct {
     size_t entry_count;
 } raft_message_t;
 
-/* Application callbacks — implement these for your state machine. */
+/*
+ * Application callbacks — implement these four functions to connect your
+ * state machine to the consensus engine.
+ *
+ *  apply            Called once per committed log entry (in index order) on
+ *                   the rxnet thread.  Mutate your state here.
+ *
+ *  reload           Called on restart when no snapshot exists on disk.
+ *                   Reset your state to "empty"; the engine will re-apply
+ *                   every committed log entry through apply().
+ *
+ *  snapshot         Called during log compaction.  Serialise your full state
+ *                   into buf (max buf_size bytes).  Return bytes written.
+ *                   Override RAFT_MAX_SNAPSHOT_SIZE before including this
+ *                   header if your state exceeds the default 4096 bytes.
+ *
+ *  restore_snapshot Called on restart when a snapshot exists on disk.
+ *                   Deserialise buf into your state machine; the engine will
+ *                   then re-apply any log entries that follow the snapshot.
+ */
 typedef struct {
-    void (*apply)(void *user, const raft_command_t *command);
-    void (*reload)(void *user);
-    size_t (*snapshot)(void *user, void *buf, size_t buf_size);
-    void (*restore_snapshot)(void *user, const void *buf, size_t size);
-    void *user;
+    void   (*apply)            (void *user, const raft_command_t *command);
+    void   (*reload)           (void *user);
+    size_t (*snapshot)         (void *user, void *buf, size_t buf_size);
+    void   (*restore_snapshot) (void *user, const void *buf, size_t size);
+    void  *user;
 } raft_application_t;
 
 typedef struct {
@@ -97,28 +116,58 @@ typedef struct {
     size_t node_count;
 } raft_memory_transport_t;
 
-/* Pluggable transport vtable — implement to support TCP, BLE, etc. */
+/*
+ * Pluggable transport vtable — implement to support TCP, BLE, etc.
+ *
+ *  send            Send a Raft protocol message to msg->target.
+ *  recv            Drain incoming Raft messages into out[0..capacity-1];
+ *                  return the number of messages written.
+ *  submit_command  Enqueue a client command for the leader to process.
+ *  recv_commands   Drain pending client commands (called on the leader each
+ *                  tick); return the number of commands written.
+ *  set_enabled     Gate the transport on simulated node stop/start (optional,
+ *                  may be NULL).
+ *
+ * send/recv carry raft_message_t (Raft protocol).
+ * submit_command/recv_commands carry raft_command_t (application level).
+ */
 typedef struct {
     int    (*send)           (void *ctx, const raft_message_t *msg);
     size_t (*recv)           (void *ctx, raft_message_t *out, size_t capacity);
     int    (*submit_command) (void *ctx, const raft_command_t *cmd);
     size_t (*recv_commands)  (void *ctx, raft_command_t *out, size_t capacity);
-    void   (*set_enabled)    (void *ctx, int enabled); /* optional, may be NULL */
-    void *ctx;
+    void   (*set_enabled)    (void *ctx, int enabled);
+    void  *ctx;
 } raft_transport_t;
 
 typedef struct raft_node    raft_node_t;
 typedef struct raft_cluster raft_cluster_t;
 
+/*
+ * Per-node configuration.  Zero-initialise with memset before filling.
+ *
+ *  node_id               Unique identifier for this node (max RAFT_MAX_ID-1 chars).
+ *  peers / peer_count    IDs of the other nodes this node talks to.  The
+ *                        transport uses these to route outgoing messages.
+ *  initial_members /     IDs of ALL nodes in the initial cluster.  Must be
+ *  initial_member_count  identical on every node that bootstraps together.
+ *                        Leave at zero for nodes joining via --join / learner=1.
+ *  learner               Set to 1 for a joining node.  Prevents the node from
+ *                        auto-bootstrapping a solo cluster on first start.
+ *  election_timeout_ms   Follower fires an election if no heartbeat is received
+ *                        within [timeout, 2×timeout) ms.  Guideline: ≥ 5×RTT.
+ *  heartbeat_interval_ms Leader sends a heartbeat every this many ms.
+ *                        Guideline: ≤ election_timeout_ms / 5.
+ */
 typedef struct {
-    char node_id[RAFT_MAX_ID];
-    char peers[RAFT_MAX_PEERS][RAFT_MAX_ID];
+    char   node_id[RAFT_MAX_ID];
+    char   peers[RAFT_MAX_PEERS][RAFT_MAX_ID];
     size_t peer_count;
-    char initial_members[RAFT_MAX_NODES][RAFT_MAX_ID];
+    char   initial_members[RAFT_MAX_NODES][RAFT_MAX_ID];
     size_t initial_member_count;
-    int learner;                 /* 1 = joining node; skip auto-bootstrap */
-    int election_timeout_ms;
-    int heartbeat_interval_ms;
+    int    learner;
+    int    election_timeout_ms;
+    int    heartbeat_interval_ms;
 } raft_node_config_t;
 
 typedef struct {

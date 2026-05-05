@@ -164,6 +164,81 @@ static int forward_to_leader(cli_user_t *cli, const raft_command_t *cmd) {
     return 0;
 }
 
+static int node_log_has_command(const raft_node_t *node, const raft_command_t *cmd) {
+    size_t i;
+    for (i = 0; i < node->log_count; ++i) {
+        const raft_command_t *logged = &node->log[i].command;
+        if (strcmp(logged->op, cmd->op) == 0 &&
+            strcmp(logged->key, cmd->key) == 0 &&
+            strcmp(logged->value, cmd->value) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int tcp_command_queue_has(const raft_tcp_transport_t *tcp, const raft_command_t *cmd) {
+    size_t i;
+    for (i = 0; i < tcp->cmd_count; ++i) {
+        const raft_command_t *queued = &tcp->cmd_queue[i];
+        if (strcmp(queued->op, cmd->op) == 0 &&
+            strcmp(queued->key, cmd->key) == 0 &&
+            strcmp(queued->value, cmd->value) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int queue_peer_set(cli_user_t *cli, const char *id, const char *host, int port) {
+    raft_command_t cmd;
+    char leader_host[256];
+    int leader_port;
+    if (strcmp(id, cli->node->config.node_id) == 0) return 0;
+    memset(&cmd, 0, sizeof(cmd));
+    strncpy(cmd.op, "cluster.peer_set", sizeof(cmd.op) - 1);
+    strncpy(cmd.key, id, sizeof(cmd.key) - 1);
+    snprintf(cmd.value, sizeof(cmd.value), "%s:%d", host, port);
+
+    if (cli->node->machine.state == RAFT_ROLE_LEADER) {
+        if (node_log_has_command(cli->node, &cmd) ||
+            tcp_command_queue_has(cli->tcp, &cmd))
+            return 0;
+        return raft_node_submit_command(cli->node, &cmd);
+    }
+
+    if (find_leader_address(cli, leader_host, &leader_port) == 0)
+        return raft_tcp_transport_forward_cmd(cli->tcp, leader_host, leader_port, &cmd);
+    return -1;
+}
+
+static int peer_needs_update(const cli_user_t *cli, const char *id, const char *host, int port) {
+    size_t i;
+    if (strcmp(id, cli->node->config.node_id) == 0) return 0;
+    for (i = 0; i < cli->tcp->peer_count; ++i) {
+        if (strcmp(cli->tcp->peers[i].id, id) == 0) {
+            return strcmp(cli->tcp->peers[i].host, host) != 0 ||
+                   cli->tcp->peers[i].port != port;
+        }
+    }
+    return 1;
+}
+
+static void learn_peer(cli_user_t *cli, const char *id, const char *host, int port, int replicate) {
+    int changed = peer_needs_update(cli, id, host, port);
+    if (strcmp(id, cli->node->config.node_id) == 0) return;
+    raft_tcp_transport_add_peer(cli->tcp, id, host, port);
+    if (replicate && changed)
+        queue_peer_set(cli, id, host, port);
+}
+
+static void replicate_known_cluster_peers(cli_user_t *cli) {
+    raft_tcp_peer_t peers[RAFT_MAX_NODES];
+    size_t i, count;
+    if (cli->node->machine.state != RAFT_ROLE_LEADER) return;
+    count = collect_cluster_peers(cli, peers);
+    for (i = 0; i < count; ++i)
+        queue_peer_set(cli, peers[i].id, peers[i].host, peers[i].port);
+}
+
 static const char *role_name(int state) {
     switch (state) {
         case RAFT_ROLE_LEADER:    return "LEADER";
@@ -659,9 +734,10 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
 
             for (k = 0; k < jr->member_count; ++k) {
                 if (strcmp(jr->members[k].id, cli->node->config.node_id) != 0)
-                    raft_tcp_transport_add_peer(cli->tcp, jr->members[k].id,
-                                                jr->members[k].host,
-                                                jr->members[k].port);
+                    learn_peer(cli, jr->members[k].id,
+                               jr->members[k].host,
+                               jr->members[k].port,
+                               cli->node->machine.state == RAFT_ROLE_LEADER);
             }
 
             if (jr->forwarded == RAFT_JOIN_ORIGINAL) {
@@ -687,6 +763,7 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
 
             if (cli->node->machine.state == RAFT_ROLE_LEADER) {
                 request_membership_union(cli, jr);
+                replicate_known_cluster_peers(cli);
                 printf("\n[cluster] merge: %s\n", jr->node_id);
                 cli->prompt_needed = 1;
                 cli->pending_joins[i] = cli->pending_joins[--cli->pending_join_count];
@@ -707,7 +784,8 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
             for (k = 0; k < cli->tcp->peer_count; ++k)
                 if (strcmp(cli->tcp->peers[k].id, jr->node_id) == 0) { known = 1; break; }
             if (!known)
-                raft_tcp_transport_add_peer(cli->tcp, jr->node_id, jr->host, jr->port);
+                learn_peer(cli, jr->node_id, jr->host, jr->port,
+                           cli->node->machine.state == RAFT_ROLE_LEADER);
             cli->pending_joins[i] = cli->pending_joins[--cli->pending_join_count];
             continue;
         }
@@ -734,7 +812,8 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
             for (k = 0; k < cli->tcp->peer_count; ++k)
                 if (strcmp(cli->tcp->peers[k].id, jr->node_id) == 0) { known = 1; break; }
             if (!known)
-                raft_tcp_transport_add_peer(cli->tcp, jr->node_id, jr->host, jr->port);
+                learn_peer(cli, jr->node_id, jr->host, jr->port,
+                           cli->node->machine.state == RAFT_ROLE_LEADER);
         }
 
         /* Discard if this node is already in the cluster (stable or joint) */
@@ -765,6 +844,7 @@ void cli_dump_outputs(rx_fsm_context *ctx, void *user) {
             if (!already && count < RAFT_MAX_NODES) {
                 strncpy(new_members[count++], jr->node_id, RAFT_MAX_ID - 1);
                 raft_node_request_membership_change(cli->node, new_members, count);
+                replicate_known_cluster_peers(cli);
                 printf("\n[cluster] join: %s\n", jr->node_id);
                 cli->prompt_needed = 1;
             }

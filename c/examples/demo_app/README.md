@@ -94,17 +94,29 @@ n2> rmnode n4
 | `help`           | Ayuda                                        |
 | `quit`           | Salir                                        |
 
+## Relanzar un nodo
+
+Una vez que el nodo ha arrancado al menos una vez, todo su estado persiste en
+disco (`var/raft/<id>/`).  Solo necesita el `--id`:
+
+```bash
+./build/raft_node --id n1
+```
+
+Puerto, host, peers y membresía se recuperan automáticamente de `self.txt` y
+`peers.txt`.
+
 ## Opciones del ejecutable
 
-| Opción                  | Descripción                                             |
-|-------------------------|---------------------------------------------------------|
-| `--id NAME`             | Identificador del nodo (requerido)                      |
-| `--port PORT`           | Puerto TCP de escucha (requerido)                       |
-| `--host HOST`           | Dirección IP propia anunciada (defecto: 127.0.0.1)      |
-| `--data DIR`            | Directorio de datos (defecto: var/raft)                 |
-| `--member ID`           | Miembro inicial del cluster (repetible)                 |
-| `--peer ID=HOST:PORT`   | Dirección de un peer conocido (repetible)               |
-| `--join HOST:PORT`      | Unirse al cluster vía ese introductor                   |
+| Opción                  | Primera vez | Reinicio | Descripción                                      |
+|-------------------------|:-----------:|:--------:|--------------------------------------------------|
+| `--id NAME`             | Requerido   | Requerido| Identificador del nodo                           |
+| `--port PORT`           | Requerido   | Opcional | Puerto TCP de escucha (persiste en `self.txt`)   |
+| `--host HOST`           | Opcional    | Opcional | IP propia anunciada (defecto: 127.0.0.1)         |
+| `--data DIR`            | Opcional    | Opcional | Directorio de datos (defecto: `var/raft`)        |
+| `--member ID`           | Requerido   | Omitir   | Miembro inicial del cluster (repetible)          |
+| `--peer ID=HOST:PORT`   | Requerido   | Omitir   | Dirección de un peer (repetible; persiste)       |
+| `--join HOST:PORT`      | Para unirse | —        | Unirse al cluster vía ese introductor            |
 
 ## Limpieza
 
