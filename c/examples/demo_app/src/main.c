@@ -236,8 +236,8 @@ static void setup(const node_args_t *a) {
     for (i = 0; i < a->peer_count; ++i)
         raft_tcp_transport_add_peer(&g_tcp, a->peer_ids[i],
                                     a->peer_hosts[i], a->peer_ports[i]);
-    if (a->port_supplied && raft_tcp_transport_start(&g_tcp) != 0) {
-        fprintf(stderr, "failed to listen on port %d\n", a->port);
+    if (g_tcp.listen_port > 0 && raft_tcp_transport_start(&g_tcp) != 0) {
+        fprintf(stderr, "failed to listen on port %d\n", g_tcp.listen_port);
         exit(1);
     }
 

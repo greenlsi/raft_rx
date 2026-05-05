@@ -93,6 +93,11 @@ static int node_term_at_index(const raft_node_t *node, int index) {
     return node->log[node_physical_index(node, index)].term;
 }
 
+static const char *node_leader_at_index(const raft_node_t *node, int index) {
+    if (index <= 0 || !node_has_log_index(node, index)) return "";
+    return node->log[node_physical_index(node, index)].leader_id;
+}
+
 /* ── Trace labels ────────────────────────────────────────────────────────── */
 #ifdef RX_TRACE_ENABLE
 enum {
@@ -349,6 +354,7 @@ static void node_send_append_entries_to(raft_node_t *node, const char *peer_id) 
     message.term          = node->current_term;
     message.prev_log_index = prev_index;
     message.prev_log_term  = prev_term;
+    strncpy(message.prev_log_leader_id, node_leader_at_index(node, prev_index), RAFT_MAX_ID - 1);
     message.leader_commit  = node->commit_index;
     strncpy(message.source, node->config.node_id, RAFT_MAX_ID - 1);
     strncpy(message.target, peer_id, RAFT_MAX_ID - 1);
@@ -471,6 +477,13 @@ static int node_append_entries_from_leader(raft_node_t *node, const raft_message
     if (message->prev_log_index > node_last_log_index(node)) return 0;
     if (message->prev_log_index > 0 &&
         node_term_at_index(node, message->prev_log_index) != message->prev_log_term) return 0;
+    /* Detect cross-cluster log conflict: same term but different creator.
+     * This happens when two independently-bootstrapped clusters are merged
+     * and share the same term numbers. */
+    if (message->prev_log_index > 0 && message->prev_log_leader_id[0] != '\0' &&
+        node_has_log_index(node, message->prev_log_index) &&
+        strcmp(node_leader_at_index(node, message->prev_log_index),
+               message->prev_log_leader_id) != 0) return 0;
 
     for (i = 0; i < message->entry_count; ++i) {
         const raft_log_entry_t *entry = &message->entries[i];
@@ -479,7 +492,12 @@ static int node_append_entries_from_leader(raft_node_t *node, const raft_message
         if (entry->index <= node->snapshot_last_included_index) continue;
 
         if (node_has_log_index(node, entry->index)) {
-            if (node_term_at_index(node, entry->index) != entry->term) {
+            int conflict = node_term_at_index(node, entry->index) != entry->term;
+            if (!conflict && entry->leader_id[0] != '\0') {
+                conflict = strcmp(node_leader_at_index(node, entry->index),
+                                  entry->leader_id) != 0;
+            }
+            if (conflict) {
                 /* Truncate conflicting suffix */
                 node->log_count = (size_t)node_physical_index(node, entry->index);
                 node->persist_dirty = 1;
@@ -594,6 +612,7 @@ static int node_append_internal_command(raft_node_t *node,
     memset(entry, 0, sizeof(*entry));
     entry->index = node_last_log_index(node) + 1;
     entry->term  = node->current_term;
+    strncpy(entry->leader_id, node->config.node_id, RAFT_MAX_ID - 1);
     strncpy(entry->command.op,    op,    sizeof(entry->command.op) - 1);
     strncpy(entry->command.key,   key,   sizeof(entry->command.key) - 1);
     strncpy(entry->command.value, value, sizeof(entry->command.value) - 1);
@@ -848,6 +867,7 @@ static void raft_node_latch_inputs(rx_fsm_context *ctx, void *user) {
             memset(entry, 0, sizeof(*entry));
             entry->index = node_last_log_index(node) + 1;
             entry->term  = node->current_term;
+            strncpy(entry->leader_id, node->config.node_id, RAFT_MAX_ID - 1);
             entry->command = commands[i];
             node->log_count++;
             node->persist_dirty = 1;

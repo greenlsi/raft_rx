@@ -126,8 +126,9 @@ static void write_log(FILE *fp, void *arg) {
     raft_node_t *node = ((log_writer_arg_t *)arg)->node;
     for (i = 0; i < node->log_count; ++i) {
         raft_log_entry_t *entry = &node->log[i];
-        fprintf(fp, "%d|%d|%s|%s|%s\n",
-                entry->index, entry->term, entry->command.op, entry->command.key, entry->command.value);
+        fprintf(fp, "%d|%d|%s|%s|%s|%s\n",
+                entry->index, entry->term, entry->leader_id,
+                entry->command.op, entry->command.key, entry->command.value);
     }
 }
 
@@ -267,12 +268,17 @@ void raft_storage_node_load(raft_node_t *node) {
         while (fgets(line, sizeof(line), fp) != NULL && node->log_count < RAFT_MAX_LOG) {
             raft_log_entry_t entry;
             memset(&entry, 0, sizeof(entry));
-            if (sscanf(line, "%d|%d|%31[^|]|%63[^|]|%127[^\n]",
-                       &entry.index, &entry.term, entry.command.op,
-                       entry.command.key, entry.command.value) == 5) {
-                if (entry.index <= node->snapshot_last_included_index) continue;
-                node->log[node->log_count++] = entry;
+            /* New 6-field format: index|term|leader_id|op|key|value */
+            if (sscanf(line, "%d|%d|%15[^|]|%31[^|]|%63[^|]|%127[^\n]",
+                       &entry.index, &entry.term, entry.leader_id,
+                       entry.command.op, entry.command.key, entry.command.value) != 6) {
+                /* Backward-compat: old 5-field format without leader_id */
+                if (sscanf(line, "%d|%d|%31[^|]|%63[^|]|%127[^\n]",
+                           &entry.index, &entry.term, entry.command.op,
+                           entry.command.key, entry.command.value) != 5) continue;
             }
+            if (entry.index <= node->snapshot_last_included_index) continue;
+            node->log[node->log_count++] = entry;
         }
         fclose(fp);
     }

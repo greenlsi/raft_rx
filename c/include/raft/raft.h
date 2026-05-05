@@ -55,6 +55,7 @@ typedef struct {
 typedef struct {
     int index;
     int term;
+    char leader_id[RAFT_MAX_ID]; /* node that created this entry */
     raft_command_t command;
 } raft_log_entry_t;
 
@@ -67,6 +68,7 @@ typedef struct {
     int success;
     int prev_log_index;
     int prev_log_term;
+    char prev_log_leader_id[RAFT_MAX_ID]; /* leader_id of the prev entry */
     int leader_commit;
     int match_index;
     int last_log_index;
