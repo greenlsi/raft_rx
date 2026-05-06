@@ -301,6 +301,48 @@ class DemoNode:
             raise RuntimeError("join was accepted by the leader but this node did not apply the final stable configuration")
         return response
 
+    def merge_cluster(self, target: str) -> dict[str, Any]:
+        """Merge this cluster with the cluster at target (HOST:PORT).
+
+        Both sides exchange their member lists and each requests a membership
+        change to the union, mirroring the C demo_app ``merge`` command.
+        """
+        with self.lock:
+            local_members = list(self.node.config_state.all_members())
+
+        # Send our member list to the remote; it adds us and returns its list.
+        response = _http_json(
+            "POST",
+            f"http://{target}/cluster/merge",
+            payload={"members": local_members},
+            timeout_s=self.join_timeout_s,
+        )
+        remote_members = [str(m) for m in response.get("members", [])]
+
+        # Add every remote member not yet in our cluster.
+        for member in remote_members:
+            if member not in local_members:
+                self.add_node(member)
+
+        # Wait until our membership stabilises with all expected nodes.
+        all_expected = set(local_members) | set(remote_members)
+        deadline = time.monotonic() + self.join_timeout_s
+        while time.monotonic() < deadline:
+            config = self.cluster_config()
+            if (config["membership_mode"] == "stable" and
+                    all_expected.issubset(set(config["old_members"]))):
+                break
+            time.sleep(max(self.tick_ms / 1000.0, 0.01))
+
+        with self.lock:
+            merged = list(self.node.config_state.all_members())
+        return {
+            "ok": True,
+            "local_members": local_members,
+            "remote_members": remote_members,
+            "merged_members": merged,
+        }
+
     def stop_node(self) -> dict[str, Any]:
         with self.lock:
             self.node.stop()
@@ -495,6 +537,17 @@ class DemoNode:
                             return
                         self._respond(HTTPStatus.CONFLICT, {"error": "not_leader", "leader": leader})
                         return
+                    if self.path == "/cluster/merge":
+                        # Receive remote cluster's member list, add each unknown
+                        # member to our cluster, return our own member list.
+                        remote_members = [str(m) for m in body.get("members", [])]
+                        with service.lock:
+                            local_members = list(service.node.config_state.all_members())
+                        for member in remote_members:
+                            if member not in local_members:
+                                service.add_node(member)
+                        self._respond(HTTPStatus.OK, {"members": local_members})
+                        return
                     if self.path == "/node/stop":
                         self._respond(HTTPStatus.OK, service.stop_node())
                         return
@@ -668,6 +721,15 @@ class DemoShell(cmd.Cmd):
             print("usage: join HOST:PORT")
             return
         print(self.service.join_cluster(target))
+
+    def do_merge(self, arg: str) -> None:
+        """merge HOST:PORT  — merge this cluster with the cluster at HOST:PORT"""
+        target = arg.strip()
+        if not target:
+            print("usage: merge HOST:PORT")
+            return
+        result = self.service.merge_cluster(target)
+        print(f"merged: {result['merged_members']}")
 
     def do_stop(self, arg: str) -> None:
         del arg

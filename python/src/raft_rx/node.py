@@ -363,11 +363,19 @@ class RaftNode:
     def _append_entries_from_leader(self, message: Message) -> bool:
         prev_index = int(message.payload["prev_log_index"])
         prev_term = int(message.payload["prev_log_term"])
+        prev_leader_id = str(message.payload.get("prev_log_leader_id", ""))
         if prev_index > self._last_log_index():
             return False
         if prev_index < self.snapshot_last_included_index:
             return False
         if prev_index > 0 and self._term_at_index(prev_index) != prev_term:
+            return False
+        # Detect cross-cluster log conflict: same term but different creator.
+        # This happens when two independently-bootstrapped clusters are merged
+        # and share the same term numbers.
+        if (prev_index > 0 and prev_leader_id and
+                self._has_log_index(prev_index) and
+                self._leader_at_index(prev_index) != prev_leader_id):
             return False
 
         new_entries = [LogEntry.from_dict(item) for item in message.payload["entries"]]
@@ -375,7 +383,10 @@ class RaftNode:
             if entry.index <= self.snapshot_last_included_index:
                 continue
             if self._has_log_index(entry.index):
-                if self._term_at_index(entry.index) != entry.term:
+                conflict = self._term_at_index(entry.index) != entry.term
+                if not conflict and entry.leader_id:
+                    conflict = self._leader_at_index(entry.index) != entry.leader_id
+                if conflict:
                     self._truncate_log_suffix_from(entry.index)
                     self.persist_dirty = True
                 else:
@@ -391,7 +402,7 @@ class RaftNode:
         return True
 
     def _append_client_command(self, command: Command) -> None:
-        entry = LogEntry(index=self._last_log_index() + 1, term=self.current_term, command=command)
+        entry = LogEntry(index=self._last_log_index() + 1, term=self.current_term, command=command, leader_id=self.node_id)
         self.log.append(entry)
         self.persist_dirty = True
         self.match_index[self.node_id] = entry.index
@@ -495,6 +506,7 @@ class RaftNode:
         next_index = max(next_index, self._log_base_index())
         prev_index = next_index - 1
         prev_term = 0 if prev_index == 0 else self._term_at_index(prev_index)
+        prev_leader_id = self._leader_at_index(prev_index)
         entries = [entry.to_dict() for entry in self._entries_from(next_index)]
         self._trace("raft.repl.send", len(entries))
         self.outbox.append(
@@ -506,6 +518,7 @@ class RaftNode:
                 payload={
                     "prev_log_index": prev_index,
                     "prev_log_term": prev_term,
+                    "prev_log_leader_id": prev_leader_id,
                     "entries": entries,
                     "leader_commit": self.commit_index,
                 },
@@ -777,6 +790,11 @@ class RaftNode:
         if index == self.snapshot_last_included_index:
             return self.snapshot_last_included_term
         return self._entry_at_index(index).term
+
+    def _leader_at_index(self, index: int) -> str:
+        if index <= 0 or not self._has_log_index(index):
+            return ""
+        return self._entry_at_index(index).leader_id
 
     def _entries_from(self, index: int) -> list[LogEntry]:
         if index > self._last_log_index():

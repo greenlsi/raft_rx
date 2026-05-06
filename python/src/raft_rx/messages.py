@@ -35,6 +35,7 @@ class LogEntry:
     index: int
     term: int
     command: Command
+    leader_id: str = ""  # node that created this entry
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -47,6 +48,7 @@ class LogEntry:
             index=int(data["index"]),
             term=int(data["term"]),
             command=Command.from_dict(dict(data["command"])),
+            leader_id=str(data.get("leader_id", "")),
         )
 
 
