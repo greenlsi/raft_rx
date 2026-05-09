@@ -1,214 +1,228 @@
-# Requisitos
+# Requirements
 
-## Objetivo
+## Goal
 
-Construir una librería Raft sobre `../rxnet` en C y en Python, orientada a:
+Build a Raft library on top of `../rxnet` in C and Python, aimed at:
 
-- sistemas empotrados distribuidos con restricciones de dependencias,
-- aplicaciones de terminal en macOS y Linux,
-- integración opcional con herramientas externas de observabilidad,
-- ejecución determinista basada en ticks y máquinas de estados.
+- distributed embedded systems with dependency constraints,
+- terminal applications on macOS and Linux,
+- optional integration with external observability tools,
+- deterministic execution based on ticks and state machines.
 
-El resultado debe incluir un ejemplo funcional de base de datos clave-valor distribuida con persistencia.
+The result must include a working example of a persistent distributed
+key-value database.
 
-## Alcance funcional
+## Functional Scope
 
-La librería debe implementar el núcleo del algoritmo Raft:
+The library must implement the core Raft algorithm:
 
-- elección de líder,
-- heartbeats y mantenimiento de liderazgo,
-- replicación de log,
-- confirmación por mayoría,
-- aplicación ordenada de entradas a una máquina de estados,
-- persistencia de `current_term`, `voted_for` y del log,
-- recuperación tras reinicio desde almacenamiento persistente,
-- redirección o rechazo explícito de peticiones de cliente si el nodo no es líder.
+- leader election,
+- heartbeats and leadership maintenance,
+- log replication,
+- majority-based commit,
+- ordered application of entries to a state machine,
+- persistence of `current_term`, `voted_for`, and the log,
+- recovery after restart from persistent storage,
+- explicit redirection or rejection of client requests when the node is not
+  the leader.
 
-## Requisitos de arquitectura
+## Architecture Requirements
 
-### R1. Modelo reactivo sobre `rxnet`
+### R1. Reactive model over `rxnet`
 
-Cada nodo Raft debe modelarse como una máquina de estados `rxnet` con, al menos, estos roles:
+Each Raft node must be modeled as an `rxnet` state machine with at least these
+roles:
 
 - `FOLLOWER`
 - `CANDIDATE`
 - `LEADER`
 
-Las transiciones entre roles deben estar gobernadas por eventos latcheados en el tick actual:
+Role transitions must be governed by events latched in the current tick:
 
-- expiración de timeout de elección,
-- recepción de heartbeat o `AppendEntries`,
-- recepción de votos,
-- descubrimiento de un término superior.
+- election timeout expiration,
+- heartbeat or `AppendEntries` reception,
+- vote reception,
+- discovery of a higher term.
 
-### R2. Separación por capas
+### R2. Layer separation
 
-La solución debe separar claramente:
+The solution must clearly separate:
 
-- núcleo del protocolo Raft,
-- transporte,
-- persistencia,
-- máquina de estados de aplicación,
-- observabilidad.
+- the Raft protocol core,
+- transport,
+- persistence,
+- application state machine,
+- observability.
 
-El núcleo no debe depender de una implementación concreta de red, shell o UI.
+The core must not depend on a concrete network, shell, or UI implementation.
 
-### R3. Compatibilidad C y Python
+### R3. C and Python compatibility
 
-Debe existir una implementación en C y otra en Python con semántica alineada en:
+There must be a C implementation and a Python implementation with aligned
+semantics for:
 
-- tipos de mensaje,
-- reglas de transición de término y voto,
-- reglas de validación de log,
-- semántica de commit,
-- interfaz de transporte,
-- interfaz de persistencia,
-- API de integración con una máquina de estados.
+- message types,
+- term and vote transition rules,
+- log validation rules,
+- commit semantics,
+- transport interface,
+- persistence interface,
+- application state-machine integration API.
 
-No es obligatorio compartir binarios ni ABI, pero sí el modelo conceptual y el comportamiento observable.
+Sharing binaries or an ABI is not required, but the conceptual model and
+observable behavior must match.
 
-## Requisitos de transporte
+## Transport Requirements
 
-### R4. Transporte abstracto
+### R4. Abstract transport
 
-La librería debe definir una interfaz abstracta de transporte con capacidad para:
+The library must define an abstract transport interface capable of:
 
-- enviar mensajes Raft a un peer,
-- recibir todos los mensajes pendientes para un nodo en un tick,
-- inyectar peticiones de cliente,
-- operar sin asignación dinámica en los caminos críticos del runtime C cuando sea posible.
+- sending Raft messages to a peer,
+- receiving all pending messages for a node in one tick,
+- injecting client requests,
+- avoiding dynamic allocation on critical C runtime paths whenever possible.
 
-### R5. Transporte de referencia
+### R5. Reference transport
 
-Debe incluirse al menos un transporte de referencia determinista y portable:
+At least one deterministic and portable reference transport must be included:
 
-- transporte en memoria para simulación, tests y ejemplo local.
+- an in-memory transport for simulation, tests, and local examples.
 
-Además, las demos de proceso independiente deben demostrar que el núcleo no
-depende del bus en memoria:
+In addition, the independent-process demos must demonstrate that the core does
+not depend on the in-memory bus:
 
-- C: transporte TCP enchufable con tabla de peers persistente.
-- Python: transporte HTTP en la demo externa, implementado con librería estándar.
+- C: pluggable TCP transport with a persistent peer table.
+- Python: HTTP transport in the external demo, implemented with the standard
+  library.
 
-Los transportes de host deben poder añadirse sin modificar el núcleo Raft.
+Host transports must be addable without modifying the Raft core.
 
-## Requisitos de persistencia
+## Persistence Requirements
 
-### R6. Estado persistente mínimo
+### R6. Minimum persistent state
 
-Cada nodo debe persistir de forma duradera:
+Each node must durably persist:
 
 - `current_term`,
 - `voted_for`,
-- el log Raft,
-- el estado aplicado de la máquina de estados del ejemplo clave-valor.
+- the Raft log,
+- the applied state of the key-value example state machine.
 
-### R7. Escritura segura
+### R7. Safe writes
 
-La persistencia en host debe usar escrituras atómicas o cuasi-atómicas razonables:
+Host persistence must use reasonable atomic or near-atomic writes:
 
-- fichero temporal + `rename`/`replace`,
-- formato legible y auditable,
-- recuperación robusta ante reinicios limpios.
+- temporary file plus `rename`/`replace`,
+- readable and auditable format,
+- robust recovery after clean restarts.
 
-Para objetivos empotrados, la API debe permitir sustituir esta persistencia por otra adaptada a flash, NVRAM o almacenamiento específico.
+For embedded targets, the API must allow this persistence layer to be replaced
+with one adapted to flash, NVRAM, or platform-specific storage.
 
-## Requisitos de la máquina de estados de aplicación
+## Application State-Machine Requirements
 
-### R8. API de máquina de estados
+### R8. State-machine API
 
-Debe existir una interfaz de aplicación con estas capacidades:
+There must be an application interface with these capabilities:
 
-- validar o aceptar comandos serializados,
-- aplicar entradas committed en orden,
-- consultar estado visible para cliente,
-- cargar y guardar estado persistente.
+- validate or accept serialized commands,
+- apply committed entries in order,
+- query client-visible state,
+- load and save persistent state.
 
-### R9. Ejemplo clave-valor
+### R9. Key-value example
 
-Debe entregarse una máquina de estados de ejemplo con operaciones:
+A sample state machine must be delivered with these operations:
 
 - `set(key, value)`
 - `delete(key)`
 - `get(key)`
 
-`get` puede resolverse localmente sobre el estado aplicado. `set` y `delete` deben entrar en el log del líder.
+`get` may be resolved locally against the applied state. `set` and `delete`
+must enter the leader's log.
 
-## Requisitos de observabilidad
+## Observability Requirements
 
-### R10. Observabilidad opcional y externa
+### R10. Optional and external observability
 
-La observabilidad debe ser totalmente opcional. Si no se activa, el núcleo Raft no debe depender de shell, TUI o librerías visuales.
+Observability must be fully optional. When it is not enabled, the Raft core
+must not depend on shell, TUI, or visual libraries.
 
-### R11. Eventos estructurados
+### R11. Structured events
 
-Cuando se active, cada nodo debe poder emitir eventos estructurados externos, al menos para:
+When enabled, each node must be able to emit external structured events for at
+least:
 
-- cambio de rol,
-- cambio de término,
-- voto emitido o recibido,
-- recepción y envío de RPCs,
-- append y commit de entradas,
-- aplicación de comandos a la máquina de estados,
-- errores de persistencia o transporte.
+- role changes,
+- term changes,
+- votes sent or received,
+- RPC reception and transmission,
+- entry append and commit,
+- command application to the state machine,
+- persistence or transport errors.
 
-### R12. Shell externa
+### R12. External shell
 
-Debe incluirse una shell externa básica, cómoda y extensible para Python. Su función mínima será:
+A basic, comfortable, extensible external shell must be included for Python.
+Its minimum responsibilities are:
 
-- visualizar nodos, roles y términos,
-- ver longitud de log y `commit_index`,
-- mostrar eventos recientes,
-- consultar el estado clave-valor del clúster de ejemplo.
+- display nodes, roles, and terms,
+- show log length and `commit_index`,
+- show recent events,
+- query the key-value state of the example cluster.
 
-Las demos de proceso independiente pueden incorporar una CLI local como FSM del
-mismo runtime siempre que el núcleo se mantenga separado de esa UI.
+The independent-process demos may include a local CLI as an FSM in the same
+runtime, as long as the core remains separate from that UI.
 
-## Requisitos no funcionales
+## Non-Functional Requirements
 
-### R13. Portabilidad
+### R13. Portability
 
-El código C debe compilar al menos en:
+The C code must compile at least on:
 
 - macOS,
 - Linux.
 
-La arquitectura debe mantenerse apta para portar a plataformas empotradas.
+The architecture must remain suitable for embedded-platform ports.
 
-### R14. Dependencias
+### R14. Dependencies
 
-- C: sin dependencias externas obligatorias aparte de `rxnet` y la libc estándar.
-- Python: solo librería estándar más `rxnet` local.
-- La shell externa no debe introducir dependencias en el runtime embebido.
+- C: no mandatory external dependencies beyond `rxnet` and the standard C
+  library.
+- Python: only the standard library plus local `rxnet`.
+- The external shell must not introduce dependencies into the embedded runtime.
 
-### R15. Determinismo y testabilidad
+### R15. Determinism and testability
 
-La implementación debe poder ejecutarse de forma determinista en tests:
+The implementation must be executable deterministically in tests:
 
-- reloj controlable,
-- transporte en memoria,
-- inyección explícita de timeouts,
-- verificación del estado de clúster y del log.
+- controllable clock,
+- in-memory transport,
+- explicit timeout injection,
+- cluster and log state verification.
 
-### R16. Calidad de producción
+### R16. Production quality
 
-El entregable debe incluir:
+The deliverable must include:
 
-- documentación de requisitos, diseño y tareas,
-- tests automatizados en C y Python,
-- ejemplos ejecutables,
-- manejo explícito de errores,
-- API pública clara.
+- requirements, design, and task documentation,
+- automated tests in C and Python,
+- executable examples,
+- explicit error handling,
+- clear public API.
 
-## Criterios de aceptación
+## Acceptance Criteria
 
-Se considera completado cuando:
+The work is considered complete when:
 
-1. `docs/requirements.md`, `docs/design.md` y `docs/tasks.md` describen de forma coherente el sistema.
-2. Existe una librería Python usable y testeada.
-3. Existe una librería C usable y compilable.
-4. Un clúster de 3 nodos en memoria elige líder y replica operaciones clave-valor.
-5. El estado persiste y puede recuperarse tras reinicio.
-6. La observabilidad puede activarse o desactivarse sin afectar al núcleo.
-7. Existen demos independientes en C y Python que arrancan nodos en procesos
-   separados y permiten reconfiguración de membresía.
+1. `docs/requirements.md`, `docs/design.md`, and `docs/tasks.md` describe the
+   system coherently.
+2. A usable and tested Python library exists.
+3. A usable and compilable C library exists.
+4. A 3-node in-memory cluster elects a leader and replicates key-value
+   operations.
+5. State persists and can be recovered after restart.
+6. Observability can be enabled or disabled without affecting the core.
+7. Independent C and Python demos start nodes in separate processes and allow
+   membership reconfiguration.

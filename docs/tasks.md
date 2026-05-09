@@ -1,59 +1,64 @@
-# Tareas
+# Tasks
 
-## Documentación
+## Documentation
 
-- [x] Redactar requisitos del sistema.
-- [x] Redactar diseño por capas y mapeo sobre `rxnet`.
-- [x] Definir el alcance de la primera versión productiva.
+- [x] Write system requirements.
+- [x] Write the layered design and mapping onto `rxnet`.
+- [x] Define the scope of the first production-ready version.
 
-## Estructura del proyecto
+## Project Structure
 
-- [x] Crear árbol de código Python.
-- [x] Crear árbol de código C.
-- [x] Añadir README principal y comandos de build/test.
+- [x] Create the Python code tree.
+- [x] Create the C code tree.
+- [x] Add the main README and build/test commands.
 
-## Núcleo Raft compartido conceptualmente
+## Conceptually Shared Raft Core
 
-- [x] Definir tipos de mensaje y entradas de log.
-- [x] Definir semántica de términos, votos y commit.
-- [x] Implementar reglas de validación de log.
-- [x] Implementar recuperación desde almacenamiento persistente.
+- [x] Define message types and log entries.
+- [x] Define term, vote, and commit semantics.
+- [x] Implement log validation rules.
+- [x] Implement recovery from persistent storage.
 
 ## Python
 
-- [x] Crear paquete `raft_rx`.
-- [x] Implementar reloj determinista para tests.
-- [x] Implementar transporte en memoria.
-- [x] Implementar persistencia por ficheros.
-- [x] Implementar `TelemetrySink` no-op y JSONL.
-- [x] Implementar máquina de estados clave-valor persistente.
-- [x] Implementar nodo Raft sobre `rxnet.fsm`.
-- [x] Implementar clúster de simulación.
-- [x] Crear ejemplo ejecutable de base de datos distribuida.
-- [x] Crear shell externa para operación e inspección del clúster.
-- [x] Añadir tests de elección, replicación y recuperación.
-- [x] Implementar configuración estable/joint del clúster y FSM secundaria de membresía.
-- [x] Exponer reconfiguración en shell con `members`, `addnode` y `rmnode`.
-- [x] Añadir demo independiente con transporte HTTP, CLI local, `join` y `merge`.
+- [x] Create the `raft_rx` package.
+- [x] Implement a deterministic clock for tests.
+- [x] Implement the in-memory transport.
+- [x] Implement file-based persistence.
+- [x] Implement no-op and JSONL `TelemetrySink`.
+- [x] Implement the persistent key-value state machine.
+- [x] Implement the Raft node over `rxnet.fsm`.
+- [x] Implement a simulation cluster.
+- [x] Create an executable distributed-database example.
+- [x] Create an external shell for cluster operation and inspection.
+- [x] Add tests for election, replication, and recovery.
+- [x] Implement stable/joint cluster configuration and the secondary membership
+  FSM.
+- [x] Expose reconfiguration in the shell with `members`, `addnode`, and
+  `rmnode`.
+- [x] Add an independent demo with HTTP transport, local CLI, `join`, and
+  `merge`.
 
 ## C
 
-- [x] Crear librería `raft`.
-- [x] Implementar tipos públicos y límites.
-- [x] Implementar transporte en memoria.
-- [x] Implementar persistencia de referencia en ficheros.
-- [x] Añadir trazado opcional vía `rxnet` (`RX_TRACE_ENABLE`) y ejemplo exportable.
-- [x] Implementar máquina de estados clave-valor persistente.
-- [x] Implementar nodo Raft sobre `rxnet/fsm.h`.
-- [x] Crear ejemplo de clúster de 3 nodos.
-- [x] Añadir tests de elección, replicación y reinicio.
-- [x] Portar reconfiguración `joint consensus` a la librería C.
-- [x] Añadir demo independiente con transporte TCP, CLI local, `join` y `merge`.
+- [x] Create the `raft` library.
+- [x] Implement public types and limits.
+- [x] Implement the in-memory transport.
+- [x] Implement reference file-based persistence.
+- [x] Add optional tracing through `rxnet` (`RX_TRACE_ENABLE`) and an
+  exportable example.
+- [x] Implement the persistent key-value state machine.
+- [x] Implement the Raft node over `rxnet/fsm.h`.
+- [x] Create a 3-node cluster example.
+- [x] Add tests for election, replication, and restart.
+- [x] Port `joint consensus` reconfiguration to the C library.
+- [x] Add an independent demo with TCP transport, local CLI, `join`, and
+  `merge`.
 
-## Verificación
+## Verification
 
-- [x] Ejecutar tests Python.
-- [x] Compilar C.
-- [x] Ejecutar tests C.
-- [x] Verificar el ejemplo clave-valor en ambos lenguajes.
-- [x] Actualizar la documentación con el estado final del entregable.
+- [x] Run Python tests.
+- [x] Compile C.
+- [x] Run C tests.
+- [x] Verify the key-value example in both languages.
+- [x] Update the documentation with the final state of the deliverable.

@@ -437,20 +437,102 @@ The KV shell registers additional commands:
 
 ---
 
-## 11. Standalone HTTP Demo
+# Part II - The Demo Application
+
+---
+
+## 11. Overview
 
 `python/examples/demo_app` is a separate application that consumes `raft-rx` as
-an external dependency. Each process is one Raft node and uses `HOST:PORT` as
-its node ID.
+an external dependency. It is the best place to study how the library is used in
+a real process boundary: each process hosts one Raft node, exposes an HTTP
+transport, runs a local interactive CLI, persists its own state, and uses
+`HOST:PORT` as the Raft node ID.
 
-### Run
+It is **one possible application** of the library, not the library itself. Read
+Part I to understand the core API; read this part to run and inspect a complete
+multi-process key-value service.
 
-From `python/`:
+### What the demo app adds on top of raft-rx
+
+| Concern | How the demo app handles it |
+|---|---|
+| State machine | `DemoKVApp`, a persisted key-value application |
+| Transport | HTTP transport implemented with the Python standard library |
+| Executor | `rxnet.coop.CoopExecutive` driving the Raft node and CLI FSM |
+| Command routing | Followers forward writes to the known leader |
+| Node identity | The advertised `HOST:PORT` string is also the Raft node ID |
+| API surface | Local CLI plus REST endpoints for clients and peer nodes |
+
+### Source layout
+
+```text
+python/examples/demo_app/
+├── pyproject.toml
+├── README.md
+└── src/raft_rx_demo/
+    ├── demo.py       process wiring, HTTP server, runtime and REST API
+    ├── app.py        replicated key-value application
+    ├── transport.py  HTTP transport and REST client helpers
+    └── cli.py        interactive CLI FSM
+```
+
+The demo intentionally keeps transport, application logic and CLI wiring in
+separate modules. That makes it easier to replace one concern at a time in your
+own application.
+
+---
+
+## 12. Running the Demo
+
+Run commands in this section from the `python/` directory.
+
+Start the first node:
 
 ```bash
 uv run --project examples/demo_app raft-rx-demo --bind 127.0.0.1:7400
-uv run --project examples/demo_app raft-rx-demo --join 127.0.0.1:7400 --bind 127.0.0.1:7402
 ```
+
+Start a second node and ask it to join the first:
+
+```bash
+uv run --project examples/demo_app raft-rx-demo \
+  --join 127.0.0.1:7400 \
+  --bind 127.0.0.1:7401
+```
+
+Start a third node the same way:
+
+```bash
+uv run --project examples/demo_app raft-rx-demo \
+  --join 127.0.0.1:7400 \
+  --bind 127.0.0.1:7402
+```
+
+Each process opens an interactive prompt. After election, one node becomes
+leader. You can check from any prompt:
+
+```text
+status
+members
+```
+
+Submit a write from any node:
+
+```text
+set color blue
+```
+
+If the local node is a follower, the demo forwards the write to the leader.
+Reads are local:
+
+```text
+get color
+```
+
+A local read returns the state already applied on that process. In a healthy
+cluster it quickly converges on all nodes, but it is not a linearizable read
+protocol by itself.
 
 Useful flags:
 
@@ -461,16 +543,117 @@ Useful flags:
 | `--data-dir DIR` | Persistent state directory |
 | `--tick-ms MS` | Runtime tick period; default `25` |
 
-### CLI Commands
+By default, data is stored under `var/demo/<host>_<port>`. Use `--data-dir`
+when you want predictable paths for examples or tests.
+
+---
+
+## 13. Restarting a Node
+
+Stop one process with `quit`, then restart it with the same bind address and
+data directory:
+
+```bash
+uv run --project examples/demo_app raft-rx-demo --bind 127.0.0.1:7401
+```
+
+The node reloads its durable Raft state and local KV snapshot from disk. It
+does not need to be re-added if it was still a member of the cluster when it
+stopped; the member IDs are `HOST:PORT` addresses, so the HTTP transport can
+contact peers directly from the persisted membership configuration.
+
+A three-node cluster remains available while one node is offline. If the leader
+is stopped, the remaining voters elect a new leader after the election timeout.
+
+---
+
+## 14. Adding and Removing Nodes
+
+### Adding a node at startup
+
+The simplest way to add a new process is `--join`:
+
+```bash
+uv run --project examples/demo_app raft-rx-demo \
+  --join 127.0.0.1:7400 \
+  --bind 127.0.0.1:7403
+```
+
+The introducer forwards the join request through the cluster, peers learn the
+new address, and the leader submits a membership change. The new node becomes a
+voting member once the joint-consensus transition finishes.
+
+### Adding a node from the CLI
+
+If the target process is already running, use `addnode` from any prompt:
+
+```text
+addnode 127.0.0.1:7403
+```
+
+The command is forwarded to the leader if necessary.
+
+### Removing a node
+
+Remove a node by passing the node ID, which is its `HOST:PORT` string:
+
+```text
+rmnode 127.0.0.1:7403
+```
+
+The demo sends a full target membership list to `request_membership_change`.
+Internally the Raft engine appends `cluster.enter_joint` and
+`cluster.leave_joint` entries, so the same safety rules described in Part I
+apply.
+
+---
+
+## 15. Joining and Merging Running Clusters
+
+`join HOST:PORT` makes the current node join the cluster reachable at the
+target address:
+
+```text
+join 127.0.0.1:7400
+```
+
+Use `join` when a single process should become a member of an existing cluster.
+
+`merge HOST:PORT` is different: it combines two independent clusters. Run it
+from any node in cluster A and point it at any node in cluster B:
+
+```text
+merge 127.0.0.1:7500
+```
+
+The two sides exchange their known members and addresses, then each leader
+requests the union of both member sets. Use `merge` for demos where two
+clusters were started independently and should become one cluster.
+
+---
+
+## 16. CLI Reference
+
+### Key-value commands
 
 | Command | Description |
 |---|---|
-| `status` | Local node status |
-| `members` | Membership configuration |
-| `log [LIMIT]` | Local log entries |
 | `set KEY VALUE` | Replicated write; forwarded to the leader if needed |
-| `get KEY` | Local read |
-| `delete KEY` | Replicated delete |
+| `get KEY` | Local read from the applied KV state |
+| `delete KEY` | Replicated delete; forwarded to the leader if needed |
+
+### Cluster inspection
+
+| Command | Description |
+|---|---|
+| `status` | Local role, term, leader, log length and commit index |
+| `members` | Current stable or joint membership configuration |
+| `log [LIMIT]` | Local Raft log, optionally limited to the last entries |
+
+### Cluster management
+
+| Command | Description |
+|---|---|
 | `addnode HOST:PORT` | Add a node ID/address to membership |
 | `rmnode HOST:PORT` | Remove a node ID/address from membership |
 | `join HOST:PORT` | Join the target cluster |
@@ -478,7 +661,14 @@ Useful flags:
 | `stop` / `start` | Stop or resume local Raft processing |
 | `quit` | Stop the process |
 
-### REST API
+---
+
+## 17. REST API
+
+The same process exposes HTTP endpoints on `--bind`. Client-facing endpoints
+are useful for simple scripts; Raft protocol endpoints are used by peer nodes.
+
+### Client and inspection endpoints
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -488,8 +678,6 @@ Useful flags:
 | `/kv/<KEY>` | GET | Local KV read |
 | `/kv/set` | POST | Replicated `set`; body `{"key": "...", "value": "..."}` |
 | `/kv/delete` | POST | Replicated delete; body `{"key": "..."}` |
-| `/raft/message` | POST | Incoming Raft protocol message |
-| `/raft/client-command` | POST | Forwarded client command |
 | `/cluster/add-node` | POST | Add a node; body `{"node": "HOST:PORT"}` |
 | `/cluster/remove-node` | POST | Remove a node; body `{"node": "HOST:PORT"}` |
 | `/cluster/join` | POST | Add caller node to the cluster |
@@ -498,9 +686,52 @@ Useful flags:
 | `/node/stop` | POST | Stop local Raft processing |
 | `/node/start` | POST | Resume local Raft processing |
 
+### Raft transport endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/raft/message` | POST | Incoming Raft protocol message |
+| `/raft/client-command` | POST | Forwarded client command |
+
+For example:
+
+```bash
+curl -s http://127.0.0.1:7400/status
+curl -s -X POST http://127.0.0.1:7400/kv/set \
+  -H 'content-type: application/json' \
+  -d '{"key": "color", "value": "blue"}'
+curl -s http://127.0.0.1:7401/kv/color
+```
+
 ---
 
-## 12. Public API Reference
+## 18. Demo Troubleshooting
+
+### The joining node stays alone
+
+- Check that `--join` points to a running node.
+- Check that both processes can reach each other's `--bind` addresses.
+- Run `members` and `log` on the introducer to see whether the membership
+  entries were committed.
+
+### Writes work on one node but reads look stale elsewhere
+
+- `get KEY` is a local read. Wait a few ticks or inspect `status` to confirm
+  the follower has applied the committed entry.
+- Use the leader for read-after-write demos when you need immediate feedback.
+
+### A restarted node has unexpected old data
+
+- Check the default data directory: `var/demo/<host>_<port>`.
+- Use a fresh `--data-dir` for isolated experiments.
+
+---
+
+# Part III - Reference
+
+---
+
+## 19. Public API Reference
 
 ### Package Exports
 
@@ -563,7 +794,7 @@ from raft_rx import (
 
 ---
 
-## 13. Building and Testing
+## 20. Building and Testing
 
 Run the library tests:
 
@@ -586,7 +817,7 @@ uv build
 
 ---
 
-## 14. Troubleshooting
+## 21. Troubleshooting
 
 ### No leader is elected
 

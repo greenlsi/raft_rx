@@ -151,3 +151,8 @@ Variante trazada:
 ```bash
 make -C c build/libraft_rx_trace.a
 ```
+
+## Licencia
+
+Este proyecto se distribuye bajo la GNU General Public License v3.0. Consulta
+[`LICENSE`](LICENSE) para el texto completo.

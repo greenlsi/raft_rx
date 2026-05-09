@@ -25,6 +25,22 @@ reactive-synchronous runtime.  It provides:
 - **Pluggable application** — implement four callbacks to connect your own
   state machine; the library is otherwise agnostic to what the commands mean.
 
+### How to read this guide
+
+Use Part I when you are integrating the library into your own C process. The
+most important path is:
+
+1. Implement `raft_application_t`.
+2. Create a `rx_fsm_runtime` and a `raft_cluster_t`.
+3. Add one `raft_node_t` with persistent storage.
+4. Attach either the memory transport, TCP transport, or your own
+   `raft_transport_t`.
+5. Run an rxnet executor.
+
+Use Part II when you want a complete runnable example. The demo application is
+deliberately small: it shows the same integration points with a key-value state
+machine, TCP networking, a CLI, persistence and dynamic membership.
+
 ---
 
 ## 2. Architecture
@@ -751,6 +767,20 @@ All nodes in the initial cluster must agree on the same member list.  Provide
 
 After ~1 s a leader is elected.
 
+A useful first exercise is:
+
+```
+n1> status
+n1> leader
+n1> set color blue
+n2> get color
+n3> log
+```
+
+`set` is a replicated write: it must be committed through the Raft log before
+it is applied. `get` is a local read from the node where you type it; it shows
+the state already applied on that process.
+
 ---
 
 ## 19. Restarting a node
@@ -801,7 +831,7 @@ n4> leave        # n4 removes itself
 | Command | Description |
 |---|---|
 | `set KEY VALUE` | Replicated write — forwarded to the leader automatically if this node is a follower |
-| `get KEY` | Read from the **local** KV state (no consensus required) |
+| `get KEY` | Read from the **local** KV state already applied on this process |
 | `delete KEY` | Replicated delete — forwarded to the leader if needed |
 
 ### Cluster inspection

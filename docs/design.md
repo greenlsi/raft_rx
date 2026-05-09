@@ -1,21 +1,22 @@
-# Diseño
+# Design
 
-## Resumen
+## Summary
 
-La solución se organiza en cinco capas:
+The solution is organized into five layers:
 
-1. `core`: reglas del protocolo Raft y modelado del nodo como FSM `rxnet`.
-2. `transport`: entrega de mensajes y peticiones de cliente.
-3. `storage`: persistencia de metadatos Raft, log y estado aplicado.
-4. `state_machine`: lógica de aplicación; en este proyecto, un almacén clave-valor.
-5. `telemetry`: emisión opcional de eventos estructurados para una shell externa.
+1. `core`: Raft protocol rules and node modeling as an `rxnet` FSM.
+2. `transport`: message and client-request delivery.
+3. `storage`: persistence for Raft metadata, log, and applied state.
+4. `state_machine`: application logic; in this project, a key-value store.
+5. `telemetry`: optional structured event emission for an external shell.
 
-Las implementaciones C y Python comparten la misma semántica base, aunque no el mismo layout interno.
-La reconfiguración por `joint consensus` descrita en este documento está implementada en las referencias Python y C.
+The C and Python implementations share the same baseline semantics, although
+not the same internal layout. The `joint consensus` reconfiguration described
+in this document is implemented in the Python and C references.
 
-## Modelo de nodo
+## Node Model
 
-Cada nodo mantiene:
+Each node maintains:
 
 - `node_id`
 - `config_state`
@@ -32,29 +33,31 @@ Cada nodo mantiene:
 - `next_index[peer]`
 - `match_index[peer]`
 
-La FSM `rxnet` modela el rol y los eventos principales de Raft:
+The `rxnet` FSM models the role and the main Raft events:
 
 - `FOLLOWER`
 - `CANDIDATE`
 - `LEADER`
 
-El resto del estado vive en la estructura de usuario del nodo y se actualiza en callbacks de fase.
+The rest of the state lives in the node's user structure and is updated in
+phase callbacks.
 
-Adicionalmente, la implementación Python modela dos FSM secundarias:
+In addition, the Python implementation models two secondary FSMs:
 
 - `CompactionFSM`: `IDLE -> SNAPSHOT_PENDING -> COMPACTING -> IDLE`
 - `MembershipFSM`: `STABLE -> JOINT_PENDING -> JOINT -> FINALIZING -> STABLE`
 
-La membresía ya no es una lista simple. Se representa como una configuración explícita:
+Membership is no longer a simple list. It is represented as an explicit
+configuration:
 
 - `old_members`
 - `new_members | None`
 - `configuration_index`
 
-Cuando `new_members is None`, la configuración es estable.
-Cuando `new_members` existe, el nodo está en `joint consensus`.
+When `new_members is None`, the configuration is stable. When `new_members`
+exists, the node is in `joint consensus`.
 
-La tabla principal de transición es:
+The main transition table is:
 
 - `FOLLOWER -- timeout_expired --> CANDIDATE / become_candidate`
 - `FOLLOWER -- has_append_entries --> FOLLOWER / handle_append_entries`
@@ -70,207 +73,227 @@ La tabla principal de transición es:
 - `LEADER -- has_vote --> LEADER / ignore_vote`
 - `LEADER -- time_for_heartbeat --> LEADER / send_heartbeat`
 
-Las colas de eventos se drenan en `latch_inputs` y los guards de la FSM consultan si hay eventos pendientes de cada tipo.
+Event queues are drained in `latch_inputs`, and the FSM guards check whether
+there are pending events of each type.
 
-## Mapeo sobre fases `rxnet`
+## Mapping onto `rxnet` Phases
 
 ### Latch inputs
 
-En `latch_inputs` el nodo:
+In `latch_inputs`, the node:
 
-- lee la hora actual desde un reloj abstracto,
-- drena mensajes entrantes del transporte,
-- clasifica RPCs y respuestas en colas pendientes,
-- detecta si hay timeout de elección o de heartbeat,
-- acumula comandos de cliente pendientes,
-- calcula flags de transición para la FSM.
+- reads the current time from an abstract clock,
+- drains incoming messages from the transport,
+- classifies RPCs and responses into pending queues,
+- detects election or heartbeat timeouts,
+- accumulates pending client commands,
+- computes transition flags for the FSM.
 
-En esta fase también se preparan buffers de salida y se marcan escrituras persistentes pendientes.
+This phase also prepares output buffers and marks pending persistent writes.
 
 ### Evaluate
 
-`rxnet` evalúa la primera transición habilitada según el orden de la tabla anterior.
-Esto fuerza una semántica clara basada en eventos Raft, no en callbacks laterales.
+`rxnet` evaluates the first enabled transition according to the order in the
+table above. This enforces clear semantics based on Raft events rather than
+side-effect callbacks.
 
 ### Commit
 
-La FSM publica el nuevo rol y ejecuta una acción diferida asociada a la transición:
+The FSM publishes the new role and executes a deferred action associated with
+the transition:
 
-- `become_candidate`: incrementa término, vota por sí mismo y envía `RequestVote`,
-- `become_leader`: inicializa índices de replicación y envía heartbeat inmediato,
-- `back_to_follower_due_to_timeout`: abandona la candidatura actual y rearma timeout,
-- `handle_append_entries`: procesa el RPC del líder,
-- `handle_vote_request`: decide concesión de voto,
-- `handle_vote`: acumula votos de una elección activa,
-- `send_heartbeat`: envía `AppendEntries` vacío,
-- `ignore_vote` y `ignore_vote_request`: consumen eventos no relevantes para ese rol.
+- `become_candidate`: increments the term, votes for itself, and sends
+  `RequestVote`,
+- `become_leader`: initializes replication indexes and sends an immediate
+  heartbeat,
+- `back_to_follower_due_to_timeout`: abandons the current candidacy and resets
+  the timeout,
+- `handle_append_entries`: processes the leader RPC,
+- `handle_vote_request`: decides whether to grant the vote,
+- `handle_vote`: accumulates votes for an active election,
+- `send_heartbeat`: sends an empty `AppendEntries`,
+- `ignore_vote` and `ignore_vote_request`: consume events that are not
+  relevant to that role.
 
 ### Deferred actions
 
-Las acciones diferidas se usan solo para cambios de rol y envíos iniciales asociados a la transición. Esto mantiene la separación entre decisión de estado y efectos laterales.
+Deferred actions are used only for role changes and the initial sends
+associated with the transition. This keeps the decision about state separate
+from side effects.
 
 ### Dump outputs
 
-En `dump_outputs` el nodo:
+In `dump_outputs`, the node:
 
-- persiste metadatos y log si están sucios,
-- envía mensajes pendientes,
-- avanza la replicación del líder,
-- aplica entradas committed a la máquina de estados,
-- emite telemetría opcional.
+- persists dirty metadata and log data,
+- sends pending messages,
+- advances leader replication,
+- applies committed entries to the state machine,
+- emits optional telemetry.
 
-## Tipos de mensaje
+## Message Types
 
-Se definen cuatro tipos básicos:
+Four basic types are defined:
 
 - `REQUEST_VOTE`
 - `REQUEST_VOTE_RESPONSE`
 - `APPEND_ENTRIES`
 - `APPEND_ENTRIES_RESPONSE`
 
-Y un tipo auxiliar interno para clientes:
+And one internal auxiliary type for clients:
 
 - `CLIENT_COMMAND`
 
-Cada mensaje contiene:
+Each message contains:
 
 - `term`
 - `source`
 - `target`
-- campos específicos del RPC
+- RPC-specific fields
 
-`APPEND_ENTRIES` transporta cero o más entradas. Cero entradas equivale a heartbeat.
+`APPEND_ENTRIES` carries zero or more entries. Zero entries is equivalent to a
+heartbeat.
 
-## Log y commit
+## Log and Commit
 
-Cada entrada de log contiene:
+Each log entry contains:
 
 - `term`
 - `index`
 - `leader_id`
 - `command`
 
-El líder:
+The leader:
 
-- acepta comandos de cliente,
-- los añade al log local,
-- replica mediante `AppendEntries`,
-- actualiza `commit_index` cuando la entrada está replicada por mayoría en el término actual.
+- accepts client commands,
+- appends them to its local log,
+- replicates them with `AppendEntries`,
+- updates `commit_index` when the entry is replicated by a majority in the
+  current term.
 
-Los followers:
+Followers:
 
-- validan `prev_log_index` y `prev_log_term`,
-- corrigen conflictos truncando el sufijo incompatible,
-- añaden las nuevas entradas válidas,
-- actualizan `commit_index` según `leader_commit`.
+- validate `prev_log_index` and `prev_log_term`,
+- correct conflicts by truncating the incompatible suffix,
+- append valid new entries,
+- update `commit_index` according to `leader_commit`.
 
-### Reconfiguración de clúster
+### Cluster reconfiguration
 
-Los cambios de membresía no se aplican con una sola entrada.
-Se modelan como dos entradas de log:
+Membership changes are not applied with a single entry. They are modeled as
+two log entries:
 
 - `cluster.enter_joint(C_new)`
 - `cluster.leave_joint(C_new)`
 
-La shell expone operaciones de alto nivel como `addnode` y `rmnode`, pero internamente el líder activa la `MembershipFSM`, que materializa esa secuencia.
+The shell exposes high-level operations such as `addnode` and `rmnode`, but
+internally the leader activates the `MembershipFSM`, which materializes that
+sequence.
 
-Durante `joint consensus`, el cálculo de commit exige doble mayoría:
+During `joint consensus`, commit calculation requires a double majority:
 
-- mayoría sobre `old_members`
-- mayoría sobre `new_members`
+- majority over `old_members`
+- majority over `new_members`
 
-La finalización de la transición solo ocurre cuando el líder considera que los miembros de `C_new` están suficientemente puestos al día.
+The transition only finishes when the leader considers the members of `C_new`
+sufficiently caught up.
 
-### Alcance actual de reconfiguración
+### Current reconfiguration scope
 
-La implementación actual cubre:
+The current implementation covers:
 
-- representación persistente de configuración estable o joint,
-- quorum doble para commit en modo joint,
-- transición en dos entradas de log,
-- shell operativa para `members`, `addnode` y `rmnode`,
-- provisión local de nodos nuevos en el clúster de simulación.
+- persistent representation of stable or joint configuration,
+- double quorum for commit in joint mode,
+- two-log-entry transition,
+- operational shell support for `members`, `addnode`, and `rmnode`,
+- local provisioning of new nodes in the simulation cluster.
 
-Todavía no cubre:
+It does not yet cover:
 
-- `InstallSnapshot` para incorporación acelerada de nodos rezagados,
-- restricciones adicionales de elegibilidad de líder durante reconfiguración.
+- `InstallSnapshot` for accelerated onboarding of lagging nodes,
+- additional leader-eligibility restrictions during reconfiguration.
 
-## Persistencia
+## Persistence
 
-Se usan dos abstracciones:
+Two abstractions are used:
 
-- `RaftStorage`: estado persistente del protocolo.
-- `StateMachineStorage`: persistencia del estado aplicado de la aplicación.
+- `RaftStorage`: persistent protocol state.
+- `StateMachineStorage`: persistence for applied application state.
 
-En host, la persistencia de referencia se implementa con ficheros por nodo:
+On host systems, the reference persistence is implemented with per-node files:
 
-- `meta.json` o `meta.txt`
-- `log.jsonl` o `log.txt`
-- `kv.json` o `kv.txt`
+- `meta.json` or `meta.txt`
+- `log.jsonl` or `log.txt`
+- `kv.json` or `kv.txt`
 
-En `meta.json` se persisten también:
+`meta.json` also persists:
 
 - `old_members`
 - `new_members`
 - `configuration_index`
 - `compaction_threshold`
-- metadatos de snapshot
+- snapshot metadata
 
-Las escrituras de metadatos y de la máquina de estados se hacen mediante fichero temporal y reemplazo atómico. El log puede reescribirse entero en esta primera versión para simplificar robustez y trazabilidad.
+Metadata and state-machine writes use a temporary file followed by an atomic
+replace. In this first version, the log may be rewritten in full to simplify
+robustness and traceability.
 
-## Transporte
+## Transport
 
-La interfaz de transporte ofrece:
+The transport interface offers:
 
 - `send(message)`
-- `recv_for(node_id) -> mensajes`
+- `recv_for(node_id) -> messages`
 - `submit_client_command(node_id, command)`
 - `recv_client_commands(node_id)`
 
-La implementación de referencia es un bus en memoria, determinista y sin hilos, útil para:
+The reference implementation is an in-memory bus, deterministic and
+thread-free, useful for:
 
 - tests,
-- simulación,
-- ejemplo de base de datos distribuida en un solo proceso.
+- simulation,
+- a single-process distributed-database example.
 
-Además del transporte en memoria, el repositorio incluye transportes de demo
-para ejecución multi-proceso:
+In addition to the in-memory transport, the repository includes demo
+transports for multi-process execution:
 
-- C: `raft_tcp_transport_t`, expuesto en `raft/raft_tcp_transport.h`, con
-  listener TCP, tabla de peers persistente y protocolo de `join`/`merge`.
-- Python: `HttpTransport` dentro de `python/examples/demo_app`, con endpoints
-  REST para mensajes Raft, comandos de cliente y cambios de membresía.
+- C: `raft_tcp_transport_t`, exposed in `raft/raft_tcp_transport.h`, with a
+  TCP listener, persistent peer table, and `join`/`merge` protocol.
+- Python: `HttpTransport` inside `python/examples/demo_app`, with REST
+  endpoints for Raft messages, client commands, and membership changes.
 
-La API deja espacio para transportes futuros sobre UDP, sockets Unix o colas RTOS.
+The API leaves room for future transports over UDP, Unix sockets, or RTOS
+queues.
 
-## Reloj
+## Clock
 
-El tiempo no se lee directamente del sistema dentro del core. Se abstrae mediante un reloj:
+Time is not read directly from the system inside the core. It is abstracted
+through a clock:
 
 - Python: `Clock.now_ms()`
-- C: callback o campo actualizado por el integrador
+- C: callback or integrator-updated field
 
-Esto permite tests deterministas y despliegues empotrados con timers propios.
+This enables deterministic tests and embedded deployments with custom timers.
 
-## Observabilidad
+## Observability
 
-En Python, la observabilidad se implementa con un `TelemetrySink` opcional. Si
-es `NoOp`, no existe coste de dependencia externa.
+In Python, observability is implemented with an optional `TelemetrySink`. If it
+is `NoOp`, there is no external dependency cost.
 
-Los eventos se emiten como estructuras ligeras y pueden serializarse como JSON Lines para ser consumidos por una shell externa.
+Events are emitted as lightweight structures and may be serialized as JSON
+Lines for consumption by an external shell.
 
-La shell genérica de Python:
+The generic Python shell:
 
-- es un proceso independiente,
-- lee eventos desde ficheros JSONL,
-- presenta una vista agregada del clúster,
-- no forma parte del runtime del nodo.
+- is an independent process,
+- reads events from JSONL files,
+- presents an aggregated cluster view,
+- is not part of the node runtime.
 
-En C, la observabilidad disponible es el trazado opcional de `rxnet`
-(`RX_TRACE_ENABLE`) y los ejemplos trazados que exportan `trace.bin`.
+In C, the available observability is optional `rxnet` tracing
+(`RX_TRACE_ENABLE`) and traced examples that export `trace.bin`.
 
-## API pública propuesta
+## Proposed Public API
 
 ### Python
 
@@ -290,24 +313,25 @@ En C, la observabilidad disponible es el trazado opcional de `rxnet`
 - `include/raft/raft_kv_app.h`
 - `include/raft/raft_tcp_transport.h`
 
-`libraft_rx.a` contiene el núcleo, transporte en memoria y persistencia de
-ficheros. `raft_tcp_transport.c` y `raft_kv_app.c` se compilan junto a la
-aplicación cuando se necesita TCP o la KV de ejemplo.
+`libraft_rx.a` contains the core, in-memory transport, and file persistence.
+`raft_tcp_transport.c` and `raft_kv_app.c` are compiled together with the
+application when TCP or the sample KV state machine is needed.
 
-## Diferencias deliberadas entre C y Python
+## Deliberate Differences Between C and Python
 
-Python prioriza:
+Python prioritizes:
 
-- ergonomía,
-- simulación,
-- shell externa,
-- inspección fácil del estado.
+- ergonomics,
+- simulation,
+- external shell,
+- easy state inspection.
 
-C prioriza:
+C prioritizes:
 
-- API explícita,
-- portabilidad a entornos restringidos,
-- buffers y capacidades fijas razonables,
-- ausencia de dependencias adicionales.
+- explicit API,
+- portability to constrained environments,
+- reasonable fixed buffers and capacities,
+- no additional dependencies.
 
-La semántica de protocolo debe mantenerse alineada, aunque la representación interna no sea idéntica.
+Protocol semantics must remain aligned, even when the internal representation
+is not identical.
