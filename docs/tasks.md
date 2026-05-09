@@ -34,19 +34,21 @@
 - [x] Añadir tests de elección, replicación y recuperación.
 - [x] Implementar configuración estable/joint del clúster y FSM secundaria de membresía.
 - [x] Exponer reconfiguración en shell con `members`, `addnode` y `rmnode`.
+- [x] Añadir demo independiente con transporte HTTP, CLI local, `join` y `merge`.
 
 ## C
 
 - [x] Crear librería `raft`.
-- [x] Implementar tipos públicos, límites y códigos de error.
+- [x] Implementar tipos públicos y límites.
 - [x] Implementar transporte en memoria.
 - [x] Implementar persistencia de referencia en ficheros.
-- [ ] Implementar telemetría opcional a JSON Lines.
+- [x] Añadir trazado opcional vía `rxnet` (`RX_TRACE_ENABLE`) y ejemplo exportable.
 - [x] Implementar máquina de estados clave-valor persistente.
 - [x] Implementar nodo Raft sobre `rxnet/fsm.h`.
 - [x] Crear ejemplo de clúster de 3 nodos.
 - [x] Añadir tests de elección, replicación y reinicio.
 - [x] Portar reconfiguración `joint consensus` a la librería C.
+- [x] Añadir demo independiente con transporte TCP, CLI local, `join` y `merge`.
 
 ## Verificación
 

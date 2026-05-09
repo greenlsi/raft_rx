@@ -147,6 +147,7 @@ Cada entrada de log contiene:
 
 - `term`
 - `index`
+- `leader_id`
 - `command`
 
 El líder:
@@ -233,6 +234,14 @@ La implementación de referencia es un bus en memoria, determinista y sin hilos,
 - simulación,
 - ejemplo de base de datos distribuida en un solo proceso.
 
+Además del transporte en memoria, el repositorio incluye transportes de demo
+para ejecución multi-proceso:
+
+- C: `raft_tcp_transport_t`, expuesto en `raft/raft_tcp_transport.h`, con
+  listener TCP, tabla de peers persistente y protocolo de `join`/`merge`.
+- Python: `HttpTransport` dentro de `python/examples/demo_app`, con endpoints
+  REST para mensajes Raft, comandos de cliente y cambios de membresía.
+
 La API deja espacio para transportes futuros sobre UDP, sockets Unix o colas RTOS.
 
 ## Reloj
@@ -246,37 +255,44 @@ Esto permite tests deterministas y despliegues empotrados con timers propios.
 
 ## Observabilidad
 
-La observabilidad se implementa con un `TelemetrySink` opcional. Si es `NULL` o `NoOp`, no existe coste de dependencia externa.
+En Python, la observabilidad se implementa con un `TelemetrySink` opcional. Si
+es `NoOp`, no existe coste de dependencia externa.
 
 Los eventos se emiten como estructuras ligeras y pueden serializarse como JSON Lines para ser consumidos por una shell externa.
 
-La shell de referencia:
+La shell genérica de Python:
 
 - es un proceso independiente,
 - lee eventos desde ficheros JSONL,
 - presenta una vista agregada del clúster,
-- no se enlaza con la aplicación C ni forma parte del runtime embebido.
+- no forma parte del runtime del nodo.
+
+En C, la observabilidad disponible es el trazado opcional de `rxnet`
+(`RX_TRACE_ENABLE`) y los ejemplos trazados que exportan `trace.bin`.
 
 ## API pública propuesta
 
 ### Python
 
-- `raft_rx.application`
-- `raft_rx.clock`
-- `raft_rx.messages`
-- `raft_rx.storage`
-- `raft_rx.transport`
-- `raft_rx.telemetry`
-- `raft_rx.node`
-- `raft_rx.cluster`
+- `raft_rx.RaftApplication`
+- `raft_rx.Command`, `LogEntry`, `Message`, `MessageKind`
+- `raft_rx.ManualClock`, `SystemClock`
+- `raft_rx.MemoryTransport`
+- `raft_rx.JsonFileStorage`
+- `raft_rx.JsonlTelemetrySink`, `NullTelemetrySink`
+- `raft_rx.NodeConfig`, `RaftNode`, `Role`
+- `raft_rx.RaftCluster`
+- `raft_rx.RaftShell`
 
 ### C
 
 - `include/raft/raft.h`
-- `include/raft/kv.h`
-- `include/raft/telemetry.h`
-- `include/raft/memory_transport.h`
-- `include/raft/file_storage.h`
+- `include/raft/raft_kv_app.h`
+- `include/raft/raft_tcp_transport.h`
+
+`libraft_rx.a` contiene el núcleo, transporte en memoria y persistencia de
+ficheros. `raft_tcp_transport.c` y `raft_kv_app.c` se compilan junto a la
+aplicación cuando se necesita TCP o la KV de ejemplo.
 
 ## Diferencias deliberadas entre C y Python
 

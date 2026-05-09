@@ -71,35 +71,57 @@ Los nodos existentes **no necesitan reiniciarse** para añadir un nuevo miembro.
 
 ## Eliminar un nodo
 
-En el nodo líder:
+Desde cualquier nodo que conozca al líder:
 
 ```bash
-n1> leave          # el nodo actual abandona el cluster (solo si es líder)
-n1> rmnode n4      # expulsa n4 del cluster (solo si es líder)
+n1> leave          # el nodo actual abandona el cluster
+n1> rmnode n4      # expulsa n4 del cluster
 ```
 
-Si este nodo no es el líder, usa `rmnode` en el que sí lo sea:
+Si el comando se ejecuta en un follower, la CLI lo reenvía al líder por TCP
+cuando conoce su dirección.
+
+## Unirse o fusionar en caliente
+
+Un nodo que ya está arrancado puede empezar a escuchar y unirse a otro cluster:
 
 ```bash
-n2> rmnode n4
+n4> port 5004
+n4> join 127.0.0.1:5001
 ```
+
+Si el nodo ya pertenece a otro cluster con más de un miembro, `join` solicita
+primero su salida y después se une al nuevo introductor.
+
+Para fusionar dos clusters independientes, ejecuta `merge HOST:PORT` desde
+cualquier nodo con listener activo:
+
+```bash
+n1> merge 127.0.0.1:6001
+```
+
+La demo intercambia los peers conocidos de ambos clusters y los líderes aplican
+la unión de membresía mediante Raft.
 
 ## Comandos CLI
 
 | Comando          | Descripción                                  |
 |------------------|----------------------------------------------|
-| `set KEY VALUE`  | Envía set al líder (solo en líder)           |
+| `set KEY VALUE`  | Envía set al líder; los followers reenvían   |
 | `get KEY`        | Lee KEY del estado KV local                  |
-| `delete KEY`     | Envía delete al líder (solo en líder)        |
+| `delete KEY`     | Envía delete al líder; los followers reenvían|
 | `status`         | Estado del nodo local                        |
 | `leader`         | Quién es el líder actual                     |
+| `port PORT`      | Arranca el listener TCP si no estaba activo  |
+| `join HOST:PORT` | Abandona el cluster actual y se une a otro   |
+| `merge HOST:PORT`| Fusiona este cluster con otro cluster        |
 | `stop`           | Simula caída del nodo local                  |
 | `start`          | Simula reinicio del nodo local               |
 | `members`        | Configuración de membresía actual            |
 | `log`            | Entradas del log Raft                        |
-| `addnode NODE`   | Añade NODE al cluster (solo líder)           |
-| `rmnode NODE`    | Elimina NODE del cluster (solo líder)        |
-| `leave`          | Este nodo abandona el cluster (solo líder)   |
+| `addnode NODE`   | Añade NODE al cluster; los followers reenvían|
+| `rmnode NODE`    | Elimina NODE; los followers reenvían         |
+| `leave`          | Este nodo abandona el cluster                |
 | `help`           | Ayuda                                        |
 | `quit`           | Salir                                        |
 

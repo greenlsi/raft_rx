@@ -7,7 +7,6 @@ import cmd
 import json
 import shlex
 import threading
-import time
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass

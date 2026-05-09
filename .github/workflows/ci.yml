@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # -----------------------------------------------------------------------
+  # C: warning-clean build + unit tests
+  # -----------------------------------------------------------------------
+  c-tests:
+    name: C build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout raft_rx
+        uses: actions/checkout@v4
+        with:
+          path: raft_rx
+
+      - name: Checkout rxnet dependency
+        uses: actions/checkout@v4
+        with:
+          repository: greenlsi/rxnet
+          path: rxnet
+
+      - name: Build rxnet dependency
+        working-directory: rxnet/c
+        run: make all
+
+      - name: Build library and examples
+        working-directory: raft_rx/c
+        run: make all
+
+      - name: Run unit tests
+        working-directory: raft_rx/c
+        run: make test
+
+  # -----------------------------------------------------------------------
+  # Python: lint + type-check + unit tests
+  # -----------------------------------------------------------------------
+  python-tests:
+    name: Python lint and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout raft_rx
+        uses: actions/checkout@v4
+        with:
+          path: raft_rx
+
+      - name: Checkout rxnet dependency
+        uses: actions/checkout@v4
+        with:
+          repository: greenlsi/rxnet
+          path: rxnet
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Lint (ruff)
+        working-directory: raft_rx/python
+        run: uv run --extra dev ruff check src/raft_rx/ tests/
+
+      - name: Type-check (mypy)
+        working-directory: raft_rx/python
+        run: uv run --extra dev mypy src/raft_rx/ --ignore-missing-imports
+
+      - name: Run unit tests
+        working-directory: raft_rx/python
+        run: uv run --extra dev pytest tests/ -v
+
+  # -----------------------------------------------------------------------
+  # C: sanitizer build (ASan + UBSan)
+  # -----------------------------------------------------------------------
+  c-sanitizers:
+    name: C sanitizer run (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout raft_rx
+        uses: actions/checkout@v4
+        with:
+          path: raft_rx
+
+      - name: Checkout rxnet dependency
+        uses: actions/checkout@v4
+        with:
+          repository: greenlsi/rxnet
+          path: rxnet
+
+      - name: Build rxnet dependency with sanitizers
+        working-directory: rxnet/c
+        run: |
+          make clean
+          make all CFLAGS="-std=c99 -Wall -Wextra -Wpedantic -Iinclude -fsanitize=address,undefined -fno-omit-frame-pointer -g"
+
+      - name: Build and test with sanitizers
+        working-directory: raft_rx/c
+        run: |
+          make clean
+          make test CFLAGS="-std=c99 -Wall -Wextra -Wpedantic -Iinclude -I../../rxnet/c/include -fsanitize=address,undefined -fno-omit-frame-pointer -g"
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1

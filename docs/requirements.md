@@ -84,7 +84,13 @@ Debe incluirse al menos un transporte de referencia determinista y portable:
 
 - transporte en memoria para simulación, tests y ejemplo local.
 
-Opcionalmente pueden añadirse transportes de host adicionales más adelante sin modificar el núcleo.
+Además, las demos de proceso independiente deben demostrar que el núcleo no
+depende del bus en memoria:
+
+- C: transporte TCP enchufable con tabla de peers persistente.
+- Python: transporte HTTP en la demo externa, implementado con librería estándar.
+
+Los transportes de host deben poder añadirse sin modificar el núcleo Raft.
 
 ## Requisitos de persistencia
 
@@ -148,12 +154,15 @@ Cuando se active, cada nodo debe poder emitir eventos estructurados externos, al
 
 ### R12. Shell externa
 
-Debe incluirse una shell externa básica, cómoda y extensible, fuera del runtime del nodo. Su función mínima será:
+Debe incluirse una shell externa básica, cómoda y extensible para Python. Su función mínima será:
 
 - visualizar nodos, roles y términos,
 - ver longitud de log y `commit_index`,
 - mostrar eventos recientes,
 - consultar el estado clave-valor del clúster de ejemplo.
+
+Las demos de proceso independiente pueden incorporar una CLI local como FSM del
+mismo runtime siempre que el núcleo se mantenga separado de esa UI.
 
 ## Requisitos no funcionales
 
@@ -201,3 +210,5 @@ Se considera completado cuando:
 4. Un clúster de 3 nodos en memoria elige líder y replica operaciones clave-valor.
 5. El estado persiste y puede recuperarse tras reinicio.
 6. La observabilidad puede activarse o desactivarse sin afectar al núcleo.
+7. Existen demos independientes en C y Python que arrancan nodos en procesos
+   separados y permiten reconfiguración de membresía.

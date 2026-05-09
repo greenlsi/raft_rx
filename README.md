@@ -41,6 +41,10 @@ Shell interactiva Python genérica:
 uv run --project python python/tools/raftsh.py
 ```
 
+Guía de usuario Python (integración, shell, demo HTTP, referencia completa):
+
+- [`python/docs/user-guide.md`](python/docs/user-guide.md)
+
 Comandos principales de la shell genérica:
 
 - `status`: ver estado del clúster
@@ -52,6 +56,9 @@ Comandos principales de la shell genérica:
 - `addnode NODE`, `rmnode NODE`: pedir una reconfiguración Raft por joint consensus
 - `log NODE`: inspeccionar el log local y ver qué entradas están `COMMITTED` o `UNCOMMITTED`
 - `maxlog [ENTRIES]`: consultar o cambiar, por consenso, el umbral de compactación
+- `dump`: volcar el resumen del clúster en JSON
+- `trace [PATH]`: exportar una traza binaria si el clúster fue creado con trazado
+- `trace_report [PATH]`: exportar un informe HTML si el trazado está activo
 - `events [NODE ...]`: ver telemetría reciente
 
 Shell del ejemplo KV:
@@ -74,6 +81,12 @@ Demo Python independiente (aplicación separada que consume `raft-rx`):
 uv run --project python/examples/demo_app raft-rx-demo --bind 127.0.0.1:7400
 uv run --project python/examples/demo_app raft-rx-demo --join 127.0.0.1:7400 --bind 127.0.0.1:7402
 ```
+
+La demo Python expone una CLI local y una API HTTP. La CLI incluye
+`status`, `members`, `log [LIMIT]`, `set`, `get`, `delete`, `addnode`,
+`rmnode`, `join`, `merge`, `stop` y `start`. En esta demo los identificadores
+de nodo son direcciones `HOST:PORT`, por lo que `addnode` y `rmnode` reciben
+también valores `HOST:PORT`.
 
 Tests de la demo independiente:
 
@@ -103,7 +116,9 @@ Demo app C independiente (aplicación separada que consume `raft_rx`):
 
 ```bash
 make -C c/examples/demo_app
-./c/examples/demo_app/build/raft_kv_demo_app
+./c/examples/demo_app/build/raft_node --id n1 --port 5001 \
+  --member n1 --member n2 --member n3 \
+  --peer n2=127.0.0.1:5002 --peer n3=127.0.0.1:5003
 ```
 
 La API C ya soporta reconfiguración consensuada con `raft_node_request_membership_change(...)`, persistencia de configuración estable/joint y quorum doble durante `joint consensus`.

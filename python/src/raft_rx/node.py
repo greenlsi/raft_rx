@@ -217,7 +217,6 @@ class RaftNode:
     def _latch_inputs(self) -> None:
         if not self.running:
             return
-        now = self.clock.now_ms()
 
         for message in self.transport.recv_for(self.node_id):
             self._emit("recv", {"kind": message.kind.value, "source": message.source, "term": message.term})
