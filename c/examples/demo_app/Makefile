@@ -1,4 +1,5 @@
 CC ?= cc
+CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra
 
 C_ROOT := ../..
@@ -24,7 +25,7 @@ $(RXNET_LIB):
 	$(MAKE) -C $(RXNET_C_ROOT) build/librxnet.a
 
 $(TARGET): build $(SRC) $(RAFT_LIB) $(RXNET_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(SRC) $(RAFT_LIB) $(RXNET_LIB) -lpthread
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -o $@ $(SRC) $(RAFT_LIB) $(RXNET_LIB) -lpthread
 
 run: $(TARGET)
 	./$(TARGET)

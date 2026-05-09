@@ -1,10 +1,6 @@
 // Copyright 2026 Jose M. Moya <jm.moya@upm.es>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include "raft/raft.h"
 #include "raft_storage_internal.h"
 
