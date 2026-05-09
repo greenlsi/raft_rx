@@ -256,5 +256,5 @@ restarted with only its ID:
 
 ## License
 
-This project is distributed under the GNU General Public License v3.0. See
+This project is distributed under the GNU General Public License v3.0 or later. See
 [LICENSE](LICENSE) for the full text.

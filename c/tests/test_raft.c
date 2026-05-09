@@ -1,5 +1,5 @@
 // Copyright 2026 Jose M. Moya <jm.moya@upm.es>
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "raft/raft.h"
 #include "raft/raft_kv_app.h"
