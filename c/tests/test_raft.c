@@ -47,6 +47,27 @@ static raft_node_config_t make_config4(const char *node_id, const char *peer_a, 
     return config;
 }
 
+static raft_node_config_t make_single_config(const char *node_id, int election_timeout_ms) {
+    raft_node_config_t config;
+    memset(&config, 0, sizeof(config));
+    strncpy(config.node_id, node_id, RAFT_MAX_ID - 1);
+    strncpy(config.initial_members[0], node_id, RAFT_MAX_ID - 1);
+    config.initial_member_count   = 1;
+    config.election_timeout_ms    = election_timeout_ms;
+    config.heartbeat_interval_ms  = 50;
+    return config;
+}
+
+static raft_node_config_t make_learner_config(const char *node_id, int election_timeout_ms) {
+    raft_node_config_t config;
+    memset(&config, 0, sizeof(config));
+    strncpy(config.node_id, node_id, RAFT_MAX_ID - 1);
+    config.learner                = 1;
+    config.election_timeout_ms    = election_timeout_ms;
+    config.heartbeat_interval_ms  = 50;
+    return config;
+}
+
 /* Adds 3 initial nodes to cluster; kv[] must have room for at least 3 entries. */
 static void build_cluster(raft_cluster_t *cluster, rx_fsm_runtime *rt,
                           const char *root, raft_kv_state_t kv[]) {
@@ -71,7 +92,10 @@ int main(void) {
     char root[] = "/tmp/raft-c-test-XXXXXX";
     raft_cluster_t *cluster;
     raft_cluster_t *restarted;
+    raft_cluster_t *sequential;
+    raft_cluster_t *sequential_restarted;
     rx_fsm_runtime  rt1, rt2;
+    rx_fsm_runtime  rt3, rt4;
     raft_node_t *leader;
     raft_node_t *n4;
     raft_command_t command;
@@ -81,12 +105,18 @@ int main(void) {
     size_t i;
     char add_members[4][RAFT_MAX_ID] = {"n1", "n2", "n3", "n4"};
     raft_node_config_t n4_config;
+    char root_seq[] = "/tmp/raft-c-seq-test-XXXXXX";
 
     assert(mkdtemp(root) != NULL);
+    assert(mkdtemp(root_seq) != NULL);
     cluster   = calloc(1, sizeof(*cluster));
     restarted = calloc(1, sizeof(*restarted));
+    sequential = calloc(1, sizeof(*sequential));
+    sequential_restarted = calloc(1, sizeof(*sequential_restarted));
     assert(cluster != NULL);
     assert(restarted != NULL);
+    assert(sequential != NULL);
+    assert(sequential_restarted != NULL);
 
     build_cluster(cluster, &rt1, root, kv1);
 
@@ -126,6 +156,37 @@ int main(void) {
         assert(strcmp(raft_kv_get(&kv1[i], "alpha"), "1") == 0);
     }
 
+    {
+        raft_node_t *rejoining = &cluster->nodes[2];
+        raft_command_t second;
+
+        raft_node_stop(rejoining);
+
+        memset(&second, 0, sizeof(second));
+        strcpy(second.op,    "set");
+        strcpy(second.key,   "beta");
+        strcpy(second.value, "2");
+        assert(raft_node_submit_command(leader, &second) == 0);
+
+        for (i = 0; i < 80; ++i)
+            assert(raft_cluster_tick(cluster, 10) == 0);
+
+        assert(leader->commit_index > rejoining->commit_index);
+        assert(strcmp(raft_kv_get(&kv1[0], "beta"), "2") == 0);
+        assert(strcmp(raft_kv_get(&kv1[1], "beta"), "2") == 0);
+        assert(strcmp(raft_kv_get(&kv1[3], "beta"), "2") == 0);
+
+        raft_node_reset_for_join(rejoining);
+        raft_kv_state_init(&kv1[2]);
+
+        for (i = 0; i < 240; ++i)
+            assert(raft_cluster_tick(cluster, 10) == 0);
+
+        assert(rejoining->commit_index == leader->commit_index);
+        assert(strcmp(raft_kv_get(&kv1[2], "alpha"), "1") == 0);
+        assert(strcmp(raft_kv_get(&kv1[2], "beta"), "2") == 0);
+    }
+
     raft_cluster_destroy(cluster);
     rx_fsm_runtime_free(&rt1);
 
@@ -162,8 +223,72 @@ int main(void) {
 
     raft_cluster_destroy(restarted);
     rx_fsm_runtime_free(&rt2);
+
+    {
+        raft_node_config_t s1 = make_single_config("n1", 150);
+        raft_node_config_t s2 = make_learner_config("n2", 250);
+        raft_node_config_t s3 = make_learner_config("n3", 350);
+        raft_node_config_t r1 = make_single_config("n1", 150);
+        raft_node_config_t r2 = make_learner_config("n2", 250);
+        raft_node_config_t r3 = make_learner_config("n3", 350);
+        raft_application_t seq_apps[3];
+        raft_application_t restart_apps[3];
+        raft_kv_state_t seq_kv[3];
+        raft_kv_state_t restart_kv[3];
+        char add_n2[2][RAFT_MAX_ID] = {"n1", "n2"};
+        char add_n3[3][RAFT_MAX_ID] = {"n1", "n2", "n3"};
+        raft_node_t *seq_leader;
+
+        assert(rx_fsm_runtime_init(&rt3, RAFT_MAX_NODES) == 0);
+        assert(raft_cluster_init(sequential, &rt3) == 0);
+        for (i = 0; i < 3; ++i) {
+            raft_kv_state_init(&seq_kv[i]);
+            seq_apps[i] = raft_kv_make_application(&seq_kv[i]);
+        }
+        assert(raft_cluster_add_node(sequential, &s1, root_seq, &seq_apps[0], 0) != NULL);
+        for (i = 0; i < 80; ++i)
+            assert(raft_cluster_tick(sequential, 10) == 0);
+        seq_leader = raft_cluster_leader(sequential);
+        assert(seq_leader != NULL);
+
+        assert(raft_cluster_add_node(sequential, &s2, root_seq, &seq_apps[1], 0) != NULL);
+        assert(raft_node_request_membership_change(seq_leader, add_n2, 2) == 0);
+        for (i = 0; i < 160; ++i)
+            assert(raft_cluster_tick(sequential, 10) == 0);
+
+        assert(raft_cluster_add_node(sequential, &s3, root_seq, &seq_apps[2], 0) != NULL);
+        assert(raft_node_request_membership_change(seq_leader, add_n3, 3) == 0);
+        for (i = 0; i < 160; ++i)
+            assert(raft_cluster_tick(sequential, 10) == 0);
+
+        raft_cluster_destroy(sequential);
+        rx_fsm_runtime_free(&rt3);
+
+        assert(rx_fsm_runtime_init(&rt4, RAFT_MAX_NODES) == 0);
+        assert(raft_cluster_init(sequential_restarted, &rt4) == 0);
+        for (i = 0; i < 3; ++i) {
+            raft_kv_state_init(&restart_kv[i]);
+            restart_apps[i] = raft_kv_make_application(&restart_kv[i]);
+        }
+        r2.learner = 0;
+        r3.learner = 0;
+        assert(raft_cluster_add_node(sequential_restarted, &r1, root_seq, &restart_apps[0], 0) != NULL);
+        assert(raft_cluster_add_node(sequential_restarted, &r2, root_seq, &restart_apps[1], 0) != NULL);
+        assert(raft_cluster_add_node(sequential_restarted, &r3, root_seq, &restart_apps[2], 0) != NULL);
+
+        assert(raft_cluster_tick(sequential_restarted, 1) == 0);
+
+        assert(sequential_restarted->nodes[2].running);
+        assert(sequential_restarted->nodes[2].config_state.old_count == 3);
+
+        raft_cluster_destroy(sequential_restarted);
+        rx_fsm_runtime_free(&rt4);
+    }
+
     free(cluster);
     free(restarted);
+    free(sequential);
+    free(sequential_restarted);
     printf("ok\n");
     return 0;
 }

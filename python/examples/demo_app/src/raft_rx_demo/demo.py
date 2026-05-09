@@ -1,21 +1,18 @@
 # Copyright 2026 Jose M. Moya <jm.moya@upm.es>
 # SPDX-License-Identifier: MIT
 
+"""Single-process Raft/KV demo node with HTTP transport and rxnet CLI."""
 from __future__ import annotations
 
 import argparse
-import cmd
 import json
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
-from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rxnet import fsm
 
@@ -23,114 +20,11 @@ from raft_rx.clock import SystemClock
 from raft_rx.messages import Command, Message
 from raft_rx.node import NodeConfig, RaftNode, Role
 from raft_rx.storage import JsonFileStorage
+from raft_rx_demo.app import DemoKVApp
+from raft_rx_demo.cli import CLI_PERIOD_US, DemoCli, create_cli_fsm
+from raft_rx_demo.transport import HttpError, HttpTransport, http_json as _http_json
 
-
-class DemoKVApp:
-    def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.data: dict[str, str] = {}
-        self.reload()
-
-    def reload(self) -> None:
-        if self.path.exists():
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            self.data = {str(k): str(v) for k, v in raw.items()}
-        else:
-            self.data = {}
-
-    def save(self) -> None:
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.path)
-
-    def apply(self, command: Command) -> None:
-        if command.op == "set":
-            if command.value is None:
-                raise ValueError("set requires value")
-            self.data[command.key] = command.value
-        elif command.op == "delete":
-            self.data.pop(command.key, None)
-        else:
-            raise ValueError(f"unsupported op: {command.op}")
-        self.save()
-
-    def get(self, key: str) -> str | None:
-        return self.data.get(key)
-
-    def snapshot(self) -> object:
-        return dict(self.data)
-
-    def restore_snapshot(self, snapshot: object) -> None:
-        self.data = {str(k): str(v) for k, v in dict(snapshot).items()}
-        self.save()
-
-
-class HttpTransport:
-    def __init__(self, *, timeout_s: float = 1.0) -> None:
-        self.timeout_s = timeout_s
-        self._messages: deque[Message] = deque()
-        self._client_commands: deque[Command] = deque()
-        self._enabled = True
-        self._lock = threading.RLock()
-
-    def set_enabled(self, node_id: str, enabled: bool) -> None:
-        del node_id
-        with self._lock:
-            self._enabled = enabled
-            if not enabled:
-                self._messages.clear()
-                self._client_commands.clear()
-
-    def send(self, message: Message) -> None:
-        with self._lock:
-            enabled = self._enabled
-        if not enabled:
-            return
-        try:
-            _http_json(
-                "POST",
-                f"http://{message.target}/raft/message",
-                payload=message.to_dict(),
-                timeout_s=self.timeout_s,
-            )
-        except OSError:
-            return
-
-    def send_many(self, messages: list[Message]) -> None:
-        for message in messages:
-            self.send(message)
-
-    def recv_for(self, node_id: str) -> list[Message]:
-        del node_id
-        with self._lock:
-            if not self._enabled:
-                return []
-            items = list(self._messages)
-            self._messages.clear()
-            return items
-
-    def submit_client_command(self, node_id: str, command: Command) -> None:
-        del node_id
-        with self._lock:
-            if not self._enabled:
-                raise RuntimeError("node is not running")
-            self._client_commands.append(command)
-
-    def recv_client_commands(self, node_id: str) -> list[Command]:
-        del node_id
-        with self._lock:
-            if not self._enabled:
-                return []
-            items = list(self._client_commands)
-            self._client_commands.clear()
-            return items
-
-    def enqueue_message(self, message: Message) -> None:
-        with self._lock:
-            if not self._enabled:
-                return
-            self._messages.append(message)
+_DEFAULT_TICK_MS = 25
 
 
 class DemoNode:
@@ -140,7 +34,7 @@ class DemoNode:
         bind: str,
         data_dir: Path,
         join: str | None,
-        tick_ms: int = 25,
+        tick_ms: int = _DEFAULT_TICK_MS,
     ) -> None:
         self.bind = bind
         self.host, port_text = bind.rsplit(":", 1)
@@ -151,7 +45,7 @@ class DemoNode:
         self.lock = threading.RLock()
         self.clock = SystemClock()
         self.transport = HttpTransport()
-        self.runtime = fsm.Runtime()
+        self.runtime: fsm.Runtime | None = None
         self.application = DemoKVApp(data_dir / "kv.json")
         self.node = RaftNode(
             config=NodeConfig(
@@ -161,36 +55,52 @@ class DemoNode:
                 initial_members=[] if join else [bind],
             ),
             clock=self.clock,
-            transport=self.transport,
+            transport=cast(Any, self.transport),
             storage=JsonFileStorage(data_dir / "storage", bind),
             application=self.application,
         )
-        self.runtime.add_machine(self.node.machine)
-        self.runtime.add_machine(self.node.compaction_machine)
-        self.runtime.add_machine(self.node.membership_machine)
-        self.runtime.build()
         self._httpd = ThreadingHTTPServer((self.host, self.port), self._make_handler())
-        self._tick_stop = threading.Event()
-        self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True, name="raft-rx-demo-tick")
-        self._server_thread = threading.Thread(target=self._httpd.serve_forever, daemon=True, name="raft-rx-demo-http")
+        self._server_thread = threading.Thread(
+            target=self._httpd.serve_forever, daemon=True, name="raft-rx-demo-http"
+        )
+        self._exec: Any = None
+        self._exec_thread: threading.Thread | None = None
         self.command_timeout_s = 5.0
         self.startup_timeout_s = 3.0
         self.join_timeout_s = 20.0
 
     def start(self) -> None:
-        self._server_thread.start()
-        self._tick_thread.start()
+        self.start_http()
+        self.runtime = create_runtime(self, cli=None)
+        from rxnet.coop import CoopExecutive
+
+        self._exec = CoopExecutive()
+        self._exec.add(self.runtime)
+        self._exec_thread = threading.Thread(target=self._exec.run, daemon=True, name="raft-rx-exec")
+        self._exec_thread.start()
         if self.join_target is not None:
             self.join_cluster(self.join_target)
         else:
             self._wait_for_leader(self.startup_timeout_s)
 
     def close(self) -> None:
-        self._tick_stop.set()
+        if self._exec is not None:
+            self._exec.stop()
+        if self._exec_thread is not None:
+            self._exec_thread.join(timeout=1.0)
+        self._exec = None
+        self._exec_thread = None
+        self.stop_http()
+
+    def start_http(self) -> None:
+        if not self._server_thread.is_alive():
+            self._server_thread.start()
+
+    def stop_http(self) -> None:
         self._httpd.shutdown()
         self._httpd.server_close()
-        self._server_thread.join(timeout=1.0)
-        self._tick_thread.join(timeout=1.0)
+        if self._server_thread.is_alive():
+            self._server_thread.join(timeout=1.0)
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -248,6 +158,21 @@ class DemoNode:
     def delete_key(self, key: str) -> dict[str, Any]:
         return self._submit_or_forward(Command(op="delete", key=key), "/kv/delete", {"key": key})
 
+    def queue_client_command(self, command: Command) -> dict[str, Any]:
+        with self.lock:
+            if self.node.role == Role.LEADER:
+                self.node.submit_command(command)
+                return {"ok": True, "queued": True, "leader": self.bind}
+            leader = self.node.leader_id
+        if leader is None:
+            return {"ok": False, "queued": False, "error": "no_leader_known"}
+        return _http_json(
+            "POST",
+            f"http://{leader}/raft/client-command",
+            payload=command.to_dict(),
+            timeout_s=self.command_timeout_s + 1.0,
+        )
+
     def add_node(self, node_id: str) -> dict[str, Any]:
         local_leader = False
         with self.lock:
@@ -272,6 +197,13 @@ class DemoNode:
             }
         return self._forward_to_leader("/cluster/add-node", {"node": node_id}, leader)
 
+    def queue_add_node(self, node_id: str) -> dict[str, Any]:
+        with self.lock:
+            members = list(self.node.config_state.all_members())
+            if node_id not in members:
+                members.append(node_id)
+        return self.queue_membership_change(members)
+
     def remove_node(self, node_id: str) -> dict[str, Any]:
         local_leader = False
         with self.lock:
@@ -295,6 +227,26 @@ class DemoNode:
             }
         return self._forward_to_leader("/cluster/remove-node", {"node": node_id}, leader)
 
+    def queue_remove_node(self, node_id: str) -> dict[str, Any]:
+        with self.lock:
+            members = [member for member in self.node.config_state.all_members() if member != node_id]
+        return self.queue_membership_change(members)
+
+    def queue_membership_change(self, members: list[str]) -> dict[str, Any]:
+        with self.lock:
+            if self.node.role == Role.LEADER:
+                self.node.request_membership_change(members)
+                return {"ok": True, "queued": True, "leader": self.bind, "members": members}
+            leader = self.node.leader_id
+        if leader is None:
+            return {"ok": False, "queued": False, "error": "no_leader_known"}
+        return _http_json(
+            "POST",
+            f"http://{leader}/cluster/membership-request",
+            payload={"members": members},
+            timeout_s=self.command_timeout_s + 1.0,
+        )
+
     def join_cluster(self, target: str) -> dict[str, Any]:
         response = self._request_with_leader_follow(target, "/cluster/join", {"node": self.bind})
         if not self._wait_for_local_stable_membership(self.bind, timeout_s=self.join_timeout_s):
@@ -302,15 +254,10 @@ class DemoNode:
         return response
 
     def merge_cluster(self, target: str) -> dict[str, Any]:
-        """Merge this cluster with the cluster at target (HOST:PORT).
-
-        Both sides exchange their member lists and each requests a membership
-        change to the union, mirroring the C demo_app ``merge`` command.
-        """
+        """Merge this cluster with the cluster at target (HOST:PORT)."""
         with self.lock:
             local_members = list(self.node.config_state.all_members())
 
-        # Send our member list to the remote; it adds us and returns its list.
         response = _http_json(
             "POST",
             f"http://{target}/cluster/merge",
@@ -319,12 +266,10 @@ class DemoNode:
         )
         remote_members = [str(m) for m in response.get("members", [])]
 
-        # Add every remote member not yet in our cluster.
         for member in remote_members:
             if member not in local_members:
                 self.add_node(member)
 
-        # Wait until our membership stabilises with all expected nodes.
         all_expected = set(local_members) | set(remote_members)
         deadline = time.monotonic() + self.join_timeout_s
         while time.monotonic() < deadline:
@@ -396,11 +341,6 @@ class DemoNode:
                     current = str(leader)
                 time.sleep(max(self.tick_ms / 1000.0, 0.01))
         raise RuntimeError("could not reach leader")
-
-    def _tick_loop(self) -> None:
-        while not self._tick_stop.wait(self.tick_ms / 1000.0):
-            with self.lock:
-                self.runtime.tick()
 
     def _display_role(self) -> str:
         if not self.node.running:
@@ -498,6 +438,19 @@ class DemoNode:
                         service.transport.enqueue_message(Message.from_dict(body))
                         self._respond(HTTPStatus.ACCEPTED, {"ok": True})
                         return
+                    if self.path == "/raft/client-command":
+                        with service.lock:
+                            if service.node.role == Role.LEADER:
+                                command = Command.from_dict(body)
+                                service.node.submit_command(command)
+                                self._respond(
+                                    HTTPStatus.ACCEPTED,
+                                    {"ok": True, "queued": True, "leader": service.bind},
+                                )
+                                return
+                            leader = service.node.leader_id
+                        self._respond(HTTPStatus.CONFLICT, {"error": "not_leader", "leader": leader})
+                        return
                     if self.path == "/kv/set":
                         self._respond(HTTPStatus.OK, service.set_key(str(body["key"]), str(body["value"])))
                         return
@@ -509,6 +462,19 @@ class DemoNode:
                         return
                     if self.path == "/cluster/remove-node":
                         self._respond(HTTPStatus.OK, service.remove_node(str(body["node"])))
+                        return
+                    if self.path == "/cluster/membership-request":
+                        members = [str(member) for member in body.get("members", [])]
+                        with service.lock:
+                            if service.node.role == Role.LEADER:
+                                service.node.request_membership_change(members)
+                                self._respond(
+                                    HTTPStatus.ACCEPTED,
+                                    {"ok": True, "queued": True, "leader": service.bind, "members": members},
+                                )
+                                return
+                            leader = service.node.leader_id
+                        self._respond(HTTPStatus.CONFLICT, {"error": "not_leader", "leader": leader})
                         return
                     if self.path == "/cluster/join":
                         node_id = str(body["node"])
@@ -538,8 +504,6 @@ class DemoNode:
                         self._respond(HTTPStatus.CONFLICT, {"error": "not_leader", "leader": leader})
                         return
                     if self.path == "/cluster/merge":
-                        # Receive remote cluster's member list, add each unknown
-                        # member to our cluster, return our own member list.
                         remote_members = [str(m) for m in body.get("members", [])]
                         with service.lock:
                             local_members = list(service.node.config_state.all_members())
@@ -579,176 +543,14 @@ class DemoNode:
         return Handler
 
 
-class HttpError(RuntimeError):
-    def __init__(self, status: int, body: dict[str, Any]) -> None:
-        super().__init__(body.get("error", f"http {status}"))
-        self.status = status
-        self.body = body
-
-
-def _http_json(method: str, url: str, *, payload: dict[str, Any] | None = None, timeout_s: float = 2.0) -> dict[str, Any]:
-    data = None
-    headers = {"Content-Type": "application/json"}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, method=method, data=data, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            raw = response.read()
-            return json.loads(raw.decode("utf-8")) if raw else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        body = json.loads(raw.decode("utf-8")) if raw else {}
-        raise HttpError(exc.code, body) from exc
-
-
-class DemoShell(cmd.Cmd):
-    intro = "raft-rx demo shell. Type 'help' to list commands."
-    prompt = "demo> "
-
-    def __init__(self, service: DemoNode) -> None:
-        super().__init__()
-        self.service = service
-        self._refresh_prompt()
-
-    def preloop(self) -> None:
-        self._refresh_prompt()
-
-    def postcmd(self, stop: bool, line: str) -> bool:
-        del line
-        self._refresh_prompt()
-        return stop
-
-    def _refresh_prompt(self) -> None:
-        try:
-            status = self.service.status()
-            leader = status["leader_id"] or "-"
-            self.prompt = (
-                f"[{status['display_role']} {status['membership_mode']} term={status['term']} leader={leader} "
-                f"log={status['log_len']} commit={status['commit_index']}] demo> "
-            )
-        except Exception:
-            self.prompt = "[unknown] demo> "
-
-    def do_status(self, arg: str) -> None:
-        del arg
-        status = self.service.status()
-        last = status.get("last_committed_command")
-        print(
-            f"node={status['node_id']} running={status['running']} role={status['display_role']} "
-            f"term={status['term']} log={status['log_len']} commit={status['commit_index']} "
-            f"last_committed={last}"
-        )
-
-    def do_members(self, arg: str) -> None:
-        del arg
-        config = self.service.cluster_config()
-        print(
-            f"node={config['node_id']} role={config['display_role']} term={config['term']} "
-            f"leader={config['leader_id']} mode={config['membership_mode']} "
-            f"config_index={config['configuration_index']}"
-        )
-        print(f"members={config['members']}")
-        print(f"old_members={config['old_members']}")
-        print(f"new_members={config['new_members']}")
-
-    def do_log(self, arg: str) -> None:
-        value = arg.strip()
-        limit = None
-        if value:
-            try:
-                limit = int(value)
-            except ValueError:
-                print("usage: log [LIMIT]")
-                return
-        payload = self.service.log_entries(limit=limit)
-        print(
-            f"node={payload['node_id']} role={payload['display_role']} "
-            f"snapshot_index={payload['snapshot_index']} commit={payload['commit_index']} "
-            f"applied={payload['last_applied']}"
-        )
-        for item in payload["entries"]:
-            status = []
-            if item["committed"]:
-                status.append("COMMITTED")
-            if item["applied"]:
-                status.append("APPLIED")
-            state = ",".join(status) if status else "PENDING"
-            command = item["command"]
-            print(
-                f"#{item['index']} term={item['term']} state={state} "
-                f"op={command['op']} key={command['key']!r} value={command.get('value')!r}"
-            )
-
-    def do_set(self, arg: str) -> None:
-        parts = arg.split(maxsplit=1)
-        if len(parts) != 2:
-            print("usage: set KEY VALUE")
-            return
-        print(self.service.set_key(parts[0], parts[1]))
-
-    def do_get(self, arg: str) -> None:
-        key = arg.strip()
-        if not key:
-            print("usage: get KEY")
-            return
-        print(self.service.get(key))
-
-    def do_delete(self, arg: str) -> None:
-        key = arg.strip()
-        if not key:
-            print("usage: delete KEY")
-            return
-        print(self.service.delete_key(key))
-
-    def do_addnode(self, arg: str) -> None:
-        node_id = arg.strip()
-        if not node_id:
-            print("usage: addnode HOST:PORT")
-            return
-        print(self.service.add_node(node_id))
-
-    def do_rmnode(self, arg: str) -> None:
-        node_id = arg.strip()
-        if not node_id:
-            print("usage: rmnode HOST:PORT")
-            return
-        print(self.service.remove_node(node_id))
-
-    def do_join(self, arg: str) -> None:
-        target = arg.strip()
-        if not target:
-            print("usage: join HOST:PORT")
-            return
-        print(self.service.join_cluster(target))
-
-    def do_merge(self, arg: str) -> None:
-        """merge HOST:PORT  — merge this cluster with the cluster at HOST:PORT"""
-        target = arg.strip()
-        if not target:
-            print("usage: merge HOST:PORT")
-            return
-        result = self.service.merge_cluster(target)
-        print(f"merged: {result['merged_members']}")
-
-    def do_stop(self, arg: str) -> None:
-        del arg
-        print(self.service.stop_node())
-
-    def do_start(self, arg: str) -> None:
-        del arg
-        print(self.service.start_node())
-
-    def do_quit(self, arg: str) -> bool:
-        del arg
-        return True
-
-    def do_exit(self, arg: str) -> bool:
-        return self.do_quit(arg)
-
-    def do_EOF(self, arg: str) -> bool:
-        print()
-        return self.do_quit(arg)
+def create_runtime(service: DemoNode, cli: DemoCli | None, *, tick_ms: int | None = None) -> fsm.Runtime:
+    period_us = (tick_ms if tick_ms is not None else service.tick_ms) * 1000
+    runtime = fsm.Runtime()
+    service.node.add_to_runtime(runtime, period_us)
+    if cli is not None:
+        runtime.add_machine(create_cli_fsm(cli), CLI_PERIOD_US)
+    runtime.build()
+    return runtime
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -756,12 +558,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bind", default="127.0.0.1:7400", help="address to bind and advertise as HOST:PORT")
     parser.add_argument("--join", help="existing HOST:PORT to join via REST")
     parser.add_argument("--data-dir", help="directory for persistent state")
-    parser.add_argument("--tick-ms", type=int, default=25, help="tick period in milliseconds")
+    parser.add_argument("--tick-ms", type=int, default=_DEFAULT_TICK_MS, help="tick period in milliseconds")
     args = parser.parse_args(argv)
 
     data_dir = Path(args.data_dir) if args.data_dir else Path("var/demo") / args.bind.replace(":", "_")
-    service = DemoNode(bind=args.bind, data_dir=data_dir, join=args.join, tick_ms=args.tick_ms)
-    service.start()
+    service = DemoNode(
+        bind=args.bind,
+        data_dir=data_dir,
+        join=args.join,
+        tick_ms=args.tick_ms,
+    )
+    cli = DemoCli(service)
+    runtime = create_runtime(service, cli)
+    from rxnet.coop import CoopExecutive
+
+    executive = CoopExecutive()
+    cli.executive = executive
+    executive.add(runtime)
+    service.runtime = runtime
+    service._exec = executive
+    service.start_http()
 
     print(f"node={args.bind}")
     print(f"rest=http://{args.bind}")
@@ -769,9 +585,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.join:
         print(f"joined_via={args.join}")
 
-    shell = DemoShell(service)
+        def join_worker() -> None:
+            try:
+                service.join_cluster(args.join)
+            except Exception as exc:  # pragma: no cover - interactive path
+                print(f"\njoin failed: {exc}")
+                cli.prompt_needed = True
+
+        threading.Thread(target=join_worker, daemon=True, name="raft-rx-join").start()
+
     try:
-        shell.cmdloop()
+        executive.run()
     finally:
         service.close()
     return 0

@@ -4,9 +4,18 @@ Cada nodo Raft corre como un proceso independiente y se comunica con los demás
 por TCP/IP usando una capa de transporte enchufable (`raft_transport_t`).
 
 La CLI de cada nodo es una `rx_fsm_machine` registrada en el mismo runtime
-cooperativo que el nodo Raft.  El `main()` solo crea máquinas y llama a
-`rx_coop_exec_run()` — el hilo principal es el único hilo de cómputo; el único
-hilo de fondo es el listener TCP.
+cooperativo que el nodo Raft.  `main()` solo parsea argumentos, inicializa el
+nodo demo, solicita `--join` si corresponde y ejecuta el loop; el hilo principal
+es el único hilo de cómputo y el único hilo de fondo es el listener TCP.
+
+La demo está separada por responsabilidad:
+
+| Módulo | Responsabilidad |
+|--------|-----------------|
+| `main.c` | Ensamblado del proceso: Raft, TCP, runtime cooperativo y CLI FSM |
+| `demo_args.*` | CLI del proceso: flags, defaults y validación |
+| `demo_kv_app.*` | Aplicación replicada KV y adaptación de comandos internos |
+| `cli_fsm.*` | Comandos interactivos y máquina FSM de la CLI |
 
 ## Build
 

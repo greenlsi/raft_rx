@@ -710,9 +710,10 @@ c/examples/demo_app/
 ├── Makefile
 ├── README.md
 └── src/
-    ├── main.c      argument parsing, setup, rx_coop_exec_run
-    ├── cli_fsm.h   CLI state definition
-    └── cli_fsm.c   CLI FSM implementation
+    ├── main.c          process entry point and Raft/TCP/runtime composition
+    ├── demo_args.*     argument parsing and validation
+    ├── demo_kv_app.*   replicated KV application adapter
+    └── cli_fsm.*       interactive CLI FSM
 ```
 
 ---

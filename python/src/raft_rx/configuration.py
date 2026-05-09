@@ -39,7 +39,7 @@ class ClusterConfiguration:
         for member in members:
             if member and member not in normalized:
                 normalized.append(member)
-        return tuple(normalized)
+        return tuple(sorted(normalized))
 
     @classmethod
     def stable(cls, members: list[str] | tuple[str, ...], index: int = 0) -> "ClusterConfiguration":

@@ -73,9 +73,7 @@ class RaftCluster:
         )
         self.nodes[config.node_id] = node
         self.paths[config.node_id] = paths
-        self.runtime.add_machine(node.machine, period_us)
-        self.runtime.add_machine(node.compaction_machine, period_us)
-        self.runtime.add_machine(node.membership_machine, period_us)
+        node.add_to_runtime(self.runtime, period_us)
         self._refresh_trace_attachment()
         return node
 

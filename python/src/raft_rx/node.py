@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -145,6 +145,11 @@ class RaftNode:
     @property
     def role(self) -> Role:
         return Role(self.machine.state)
+
+    def add_to_runtime(self, runtime: fsm.Runtime, period_us: int = 0) -> None:
+        runtime.add_machine(self.machine, period_us)
+        runtime.add_machine(self.compaction_machine, period_us)
+        runtime.add_machine(self.membership_machine, period_us)
 
     def submit_command(self, command: Command) -> None:
         self.transport.submit_client_command(self.node_id, command)
@@ -664,7 +669,11 @@ class RaftNode:
         self.compaction_snapshot = None
         self.persist_dirty = False
         if persisted.snapshot is not None:
-            snapshot_payload = dict(persisted.snapshot).get("application", persisted.snapshot)
+            snapshot_payload = (
+                persisted.snapshot.get("application", persisted.snapshot)
+                if isinstance(persisted.snapshot, Mapping)
+                else persisted.snapshot
+            )
             self.application.restore_snapshot(snapshot_payload)
         else:
             self.application.reload()
@@ -673,6 +682,10 @@ class RaftNode:
         self.heartbeat_deadline_ms = self.last_contact_ms + self.config.heartbeat_interval_ms
         self.membership_machine.state = MembershipState.JOINT if self.config_state.is_joint() else MembershipState.STABLE
         self.membership_machine._next_state = self.membership_machine.state
+        if self.config_state.is_joint() and self.config_state.new_members is not None:
+            self.requested_membership_change = self.config_state.new_members
+            self.requested_membership_change_pending = True
+            self.pending_configuration_members = self.config_state.new_members
 
     def _next_election_timeout_ms(self) -> int:
         base = max(1, self.config.election_timeout_ms)
@@ -854,6 +867,8 @@ class RaftNode:
         import json
 
         self.pending_configuration_members = self.requested_membership_change
+        if self.pending_configuration_members is None:
+            return
         self.joint_config_index = self._last_log_index() + 1
         self.outbox.clear()
         self._append_client_command(
@@ -941,13 +956,20 @@ class RaftNode:
         target_members = self._decode_members(command.value)
         if target_members is None:
             raise ValueError("cluster.enter_joint requires a target member set")
+        if self.last_applied <= self.config_state.index:
+            return
         self.config_state = ClusterConfiguration.joint(
             self.config_state.old_members,
             target_members,
             index=self.last_applied,
         )
+        self.requested_membership_change = target_members
+        self.requested_membership_change_pending = True
+        self.pending_configuration_members = target_members
         self.joint_config_index = self.last_applied
         self._refresh_membership_state()
+        self.membership_machine.state = MembershipState.JOINT
+        self.membership_machine._next_state = MembershipState.JOINT
         self.persist_dirty = True
         self._emit(
             "membership",
@@ -959,16 +981,24 @@ class RaftNode:
             },
         )
         self._trace("raft.membership.enter_joint", self.config_state.index)
+        self._trace("raft.membership.joint_committed", self.config_state.index)
         self._trace("raft.membership.mode_joint", len(self.config_state.all_members()))
 
     def _apply_leave_joint(self, command: Command) -> None:
         target_members = self._decode_members(command.value)
         if target_members is None:
             raise ValueError("cluster.leave_joint requires a target member set")
+        if self.last_applied <= self.config_state.index:
+            return
         was_member = self.node_id in self.config_state.all_members()
         self.config_state = ClusterConfiguration.stable(target_members, index=self.last_applied)
+        self.requested_membership_change = None
+        self.requested_membership_change_pending = False
+        self.pending_configuration_members = None
         self.final_config_index = self.last_applied
         self._refresh_membership_state()
+        self.membership_machine.state = MembershipState.STABLE
+        self.membership_machine._next_state = MembershipState.STABLE
         self.persist_dirty = True
         if was_member and self.node_id not in self.config_state.all_members():
             self.stop()
@@ -981,6 +1011,7 @@ class RaftNode:
             },
         )
         self._trace("raft.membership.leave_joint", self.config_state.index)
+        self._trace("raft.membership.stable_committed", self.config_state.index)
         self._trace("raft.membership.mode_stable", len(self.config_state.old_members))
 
     def _refresh_membership_state(self) -> None:

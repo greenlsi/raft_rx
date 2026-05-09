@@ -634,6 +634,7 @@ static void node_apply_internal_command(raft_node_t *node, const raft_command_t 
     if (strcmp(command->op, "cluster.enter_joint") == 0) {
         char new_members[RAFT_MAX_NODES][RAFT_MAX_ID];
         size_t new_count = decode_member_list(command->value, new_members, RAFT_MAX_NODES);
+        if (node->last_applied <= node->config_state.index) return;
         if (new_count > 0) {
             configuration_set_joint(&node->config_state,
                                     node->config_state.old_members, node->config_state.old_count,
@@ -658,6 +659,7 @@ static void node_apply_internal_command(raft_node_t *node, const raft_command_t 
     if (strcmp(command->op, "cluster.leave_joint") == 0) {
         char members[RAFT_MAX_NODES][RAFT_MAX_ID];
         size_t member_count = decode_member_list(command->value, members, RAFT_MAX_NODES);
+        if (node->last_applied <= node->config_state.index) return;
         if (member_count > 0) {
             int was_member = node_self_is_member(node);
             configuration_set_stable(&node->config_state, members, member_count, node->last_applied);
