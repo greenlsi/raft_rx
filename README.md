@@ -1,7 +1,8 @@
 # raft_rx
 
-`raft_rx` is a Raft consensus implementation built on top of `rxnet`, with
-parallel C and Python implementations.
+`raft_rx` is a Raft consensus implementation built on top of
+[`rxnet`](https://www.github.com/greenlsi/rxnet), with parallel C and Python
+implementations.
 
 The project provides:
 
@@ -21,10 +22,10 @@ using idioms appropriate for each language.
 
 | Path | Purpose |
 |---|---|
-| `c/` | C library, tests, local examples, and TCP demo application |
-| `python/` | Python package, tests, local examples, shell, and HTTP demo application |
+| `c/` | C library, tests, and TCP demo application |
+| `python/` | Python package, tests, shell, and HTTP demo application |
 | `docs/` | Requirements, design notes, tasks, and user guides |
-| `rxnet/` | Expected sibling dependency: `../rxnet` |
+| `rxnet/` | Expected sibling checkout of [`greenlsi/rxnet`](https://www.github.com/greenlsi/rxnet) |
 
 ## Documentation
 
@@ -44,7 +45,8 @@ make -C docs
 
 ## Prerequisites
 
-The repository expects `rxnet` to be checked out next to it:
+The repository expects [`rxnet`](https://www.github.com/greenlsi/rxnet) to be
+checked out next to it:
 
 ```text
 parent/
@@ -81,7 +83,7 @@ uv build python
 
 ### C
 
-Build the C library, trace variant, tests, and examples:
+Build the C library, trace variant, and tests:
 
 ```bash
 make -C c
@@ -104,59 +106,6 @@ Build the trace-enabled variant:
 ```bash
 make -C c build/libraft_rx_trace.a
 ```
-
-## Local Examples
-
-These examples run multiple Raft nodes inside one process using deterministic
-or local transports. They are useful for quick verification and for studying
-the core APIs without operating several processes.
-
-### Python Key-Value Cluster
-
-```bash
-uv run --project python python/examples/kv_cluster.py
-```
-
-Interactive key-value shell:
-
-```bash
-uv run --project python python/examples/kv_shell.py
-```
-
-Generic cluster shell:
-
-```bash
-uv run --project python python/tools/raftsh.py
-```
-
-Trace-producing reconfiguration example:
-
-```bash
-uv run --project python python/examples/kv_reconfigure_trace.py
-```
-
-This writes:
-
-- `python/var/python-reconfigure-trace/trace.bin`
-- `python/var/python-reconfigure-trace/trace.html`
-
-### C Key-Value Cluster
-
-```bash
-make -C c build/raft_kv_cluster
-./c/build/raft_kv_cluster
-```
-
-Trace-producing C example:
-
-```bash
-make -C c build/raft_kv_cluster_trace
-./c/build/raft_kv_cluster_trace
-```
-
-This writes:
-
-- `c/var/c-trace-example/trace.bin`
 
 ## Standalone Demo Applications
 
