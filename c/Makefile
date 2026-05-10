@@ -47,8 +47,10 @@ build/raft_kv_cluster: build examples/kv_cluster.c build/raft_kv_app.o build/lib
 build/raft_kv_cluster_trace: build examples/kv_cluster_trace.c build/raft_kv_app.o build/libraft_rx_trace.a $(RXNET_TRACE_LIB)
 	$(CC) $(CPPFLAGS) $(TRACE_CFLAGS) -o $@ examples/kv_cluster_trace.c build/raft_kv_app.o build/libraft_rx_trace.a $(RXNET_TRACE_LIB)
 
-test: build/test_raft
+test: build/test_raft build/raft_kv_cluster
 	./build/test_raft
+	./build/raft_kv_cluster
+	./build/raft_kv_cluster
 
 clean:
 	rm -rf build

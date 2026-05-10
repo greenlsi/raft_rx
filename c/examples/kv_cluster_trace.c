@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static raft_node_config_t make_config(const char *node_id, const char *peer_a, const char *peer_b,
                                       int election_timeout_ms) {
@@ -53,11 +54,19 @@ int main(void) {
     raft_kv_state_t kv[RAFT_MAX_NODES];
     raft_application_t apps[RAFT_MAX_NODES];
     rx_trace_buf_t trace;
+    char root[] = "/tmp/raft-c-trace-example-XXXXXX";
+    char trace_path[256];
     char add_members[4][RAFT_MAX_ID] = {"n1", "n2", "n3", "n4"};
     size_t i;
 
     cluster = calloc(1, sizeof(*cluster));
     if (cluster == NULL) return 1;
+
+    if (mkdtemp(root) == NULL) {
+        perror("mkdtemp");
+        return 1;
+    }
+    snprintf(trace_path, sizeof(trace_path), "%s/trace.bin", root);
 
     if (rx_fsm_runtime_init(&runtime, RAFT_MAX_NODES) != 0) return 1;
     if (raft_cluster_init(cluster, &runtime) != 0) return 1;
@@ -75,9 +84,9 @@ int main(void) {
         apps[i] = raft_kv_make_application(&kv[i]);
     }
 
-    raft_cluster_add_node(cluster, &n1, "var/c-trace-example", &apps[0], 0);
-    raft_cluster_add_node(cluster, &n2, "var/c-trace-example", &apps[1], 0);
-    raft_cluster_add_node(cluster, &n3, "var/c-trace-example", &apps[2], 0);
+    raft_cluster_add_node(cluster, &n1, root, &apps[0], 0);
+    raft_cluster_add_node(cluster, &n2, root, &apps[1], 0);
+    raft_cluster_add_node(cluster, &n3, root, &apps[2], 0);
 
     for (i = 0; i < 80; ++i)
         raft_cluster_tick(cluster, 10);
@@ -103,7 +112,7 @@ int main(void) {
     for (i = 0; i < 80; ++i)
         raft_cluster_tick(cluster, 10);
 
-    raft_cluster_add_node(cluster, &n4, "var/c-trace-example", &apps[3], 0);
+    raft_cluster_add_node(cluster, &n4, root, &apps[3], 0);
     raft_node_request_membership_change(leader, add_members, 4);
 
     for (i = 0; i < 160; ++i)
@@ -120,11 +129,11 @@ int main(void) {
                raft_kv_get(&kv[i], "mode"));
     }
 
-    if (rx_trace_export(&trace, "var/c-trace-example/trace.bin") != 0) {
+    if (rx_trace_export(&trace, trace_path) != 0) {
         fprintf(stderr, "could not export trace\n");
         return 1;
     }
-    printf("trace=var/c-trace-example/trace.bin\n");
+    printf("trace=%s\n", trace_path);
 
     raft_cluster_destroy(cluster);
     rx_fsm_runtime_free(&runtime);
