@@ -471,6 +471,7 @@ static void node_handle_vote_request(raft_node_t *node, const raft_message_t *me
 
 static int node_append_entries_from_leader(raft_node_t *node, const raft_message_t *message) {
     size_t i;
+    int rebuild_applied_state = 0;
 
     /* prev_index must not be before our snapshot boundary */
     if (message->prev_log_index < node->snapshot_last_included_index) return 0;
@@ -498,6 +499,8 @@ static int node_append_entries_from_leader(raft_node_t *node, const raft_message
                                   entry->leader_id) != 0;
             }
             if (conflict) {
+                if (entry->index <= node->last_applied)
+                    rebuild_applied_state = 1;
                 /* Truncate conflicting suffix */
                 node->log_count = (size_t)node_physical_index(node, entry->index);
                 node->persist_dirty = 1;
@@ -512,9 +515,26 @@ static int node_append_entries_from_leader(raft_node_t *node, const raft_message
         }
     }
 
-    if (message->leader_commit > node->commit_index) {
+    if (rebuild_applied_state) {
         int last = node_last_log_index(node);
         node->commit_index = message->leader_commit < last ? message->leader_commit : last;
+        if (node->snapshot_last_included_index > 0 && node->storage.snapshot_buf_size > 0) {
+            if (node->application.restore_snapshot)
+                node->application.restore_snapshot(node->application.user,
+                                                   node->storage.snapshot_buf,
+                                                   node->storage.snapshot_buf_size);
+        } else {
+            if (node->application.reload)
+                node->application.reload(node->application.user);
+        }
+        node->last_applied = node->snapshot_last_included_index;
+        node->persist_dirty = 1;
+    } else if (message->leader_commit > node->commit_index) {
+        int last = node_last_log_index(node);
+        node->commit_index = message->leader_commit < last ? message->leader_commit : last;
+        node->persist_dirty = 1;
+    } else if (node->commit_index > node_last_log_index(node)) {
+        node->commit_index = node_last_log_index(node);
         node->persist_dirty = 1;
     }
     return 1;

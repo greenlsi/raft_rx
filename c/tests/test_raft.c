@@ -285,6 +285,80 @@ int main(void) {
         rx_fsm_runtime_free(&rt4);
     }
 
+    {
+        char root_merge[] = "/tmp/raft-c-merge-test-XXXXXX";
+        raft_cluster_t merge_cluster;
+        rx_fsm_runtime rt_merge;
+        raft_node_config_t m1 = make_single_config("n1", 150);
+        raft_kv_state_t merge_kv;
+        raft_application_t merge_app;
+        raft_node_t *follower;
+        raft_command_t old_a, old_b, winning_c;
+        raft_message_t append;
+
+        assert(mkdtemp(root_merge) != NULL);
+        assert(rx_fsm_runtime_init(&rt_merge, RAFT_MAX_NODES) == 0);
+        assert(raft_cluster_init(&merge_cluster, &rt_merge) == 0);
+        raft_kv_state_init(&merge_kv);
+        merge_app = raft_kv_make_application(&merge_kv);
+        follower = raft_cluster_add_node(&merge_cluster, &m1, root_merge, &merge_app, 0);
+        assert(follower != NULL);
+
+        memset(&old_a, 0, sizeof(old_a));
+        strcpy(old_a.op, "set");
+        strcpy(old_a.key, "a");
+        strcpy(old_a.value, "1");
+        memset(&old_b, 0, sizeof(old_b));
+        strcpy(old_b.op, "set");
+        strcpy(old_b.key, "b");
+        strcpy(old_b.value, "2");
+
+        follower->log_count = 2;
+        follower->log[0].index = 1;
+        follower->log[0].term = 1;
+        strcpy(follower->log[0].leader_id, "n1");
+        follower->log[0].command = old_a;
+        follower->log[1].index = 2;
+        follower->log[1].term = 1;
+        strcpy(follower->log[1].leader_id, "n1");
+        follower->log[1].command = old_b;
+        follower->commit_index = 2;
+        follower->last_applied = 2;
+        merge_app.apply(merge_app.user, &old_a);
+        merge_app.apply(merge_app.user, &old_b);
+
+        memset(&winning_c, 0, sizeof(winning_c));
+        strcpy(winning_c.op, "set");
+        strcpy(winning_c.key, "c");
+        strcpy(winning_c.value, "3");
+        memset(&append, 0, sizeof(append));
+        append.kind = RAFT_MSG_APPEND_ENTRIES;
+        append.term = 2;
+        strcpy(append.source, "n3");
+        strcpy(append.target, "n1");
+        append.prev_log_index = 0;
+        append.prev_log_term = 0;
+        append.leader_commit = 1;
+        append.entry_count = 1;
+        append.entries[0].index = 1;
+        append.entries[0].term = 1;
+        strcpy(append.entries[0].leader_id, "n3");
+        append.entries[0].command = winning_c;
+        assert(raft_memory_transport_send(&merge_cluster.transport, &append) == 0);
+
+        assert(raft_cluster_tick(&merge_cluster, 10) == 0);
+        assert(raft_cluster_tick(&merge_cluster, 10) == 0);
+
+        assert(follower->commit_index == 1);
+        assert(follower->last_applied == 1);
+        assert(strcmp(raft_kv_get(&merge_kv, "a"), "") == 0);
+        assert(strcmp(raft_kv_get(&merge_kv, "b"), "") == 0);
+        assert(strcmp(raft_kv_get(&merge_kv, "c"), "3") == 0);
+
+        raft_cluster_destroy(&merge_cluster);
+        rx_fsm_runtime_free(&rt_merge);
+    }
+
     free(cluster);
     free(restarted);
     free(sequential);

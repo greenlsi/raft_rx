@@ -368,6 +368,7 @@ class RaftNode:
         prev_index = int(message.payload["prev_log_index"])
         prev_term = int(message.payload["prev_log_term"])
         prev_leader_id = str(message.payload.get("prev_log_leader_id", ""))
+        rebuild_applied_state = False
         if prev_index > self._last_log_index():
             return False
         if prev_index < self.snapshot_last_included_index:
@@ -391,6 +392,8 @@ class RaftNode:
                 if not conflict and entry.leader_id:
                     conflict = self._leader_at_index(entry.index) != entry.leader_id
                 if conflict:
+                    if entry.index <= self.last_applied:
+                        rebuild_applied_state = True
                     self._truncate_log_suffix_from(entry.index)
                     self.persist_dirty = True
                 else:
@@ -400,10 +403,30 @@ class RaftNode:
                 self.persist_dirty = True
 
         leader_commit = int(message.payload["leader_commit"])
-        if leader_commit > self.commit_index:
+        if rebuild_applied_state:
+            self.commit_index = min(leader_commit, self._last_log_index())
+            self._restore_application_base_state()
+            self.last_applied = self.snapshot_last_included_index
+            self.persist_dirty = True
+        elif leader_commit > self.commit_index:
             self.commit_index = min(leader_commit, self._last_log_index())
             self.persist_dirty = True
+        elif self.commit_index > self._last_log_index():
+            self.commit_index = self._last_log_index()
+            self.persist_dirty = True
         return True
+
+    def _restore_application_base_state(self) -> None:
+        persisted = self.storage.load()
+        if persisted.snapshot is not None:
+            snapshot_payload = (
+                persisted.snapshot.get("application", persisted.snapshot)
+                if isinstance(persisted.snapshot, Mapping)
+                else persisted.snapshot
+            )
+            self.application.restore_snapshot(snapshot_payload)
+            return
+        self.application.restore_snapshot({})
 
     def _append_client_command(self, command: Command) -> None:
         entry = LogEntry(index=self._last_log_index() + 1, term=self.current_term, command=command, leader_id=self.node_id)

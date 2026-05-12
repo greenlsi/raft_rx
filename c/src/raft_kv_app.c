@@ -47,7 +47,8 @@ static void kv_apply(void *user, const raft_command_t *command) {
 }
 
 static void kv_reload(void *user) {
-    (void)user;
+    raft_kv_state_t *kv = (raft_kv_state_t *)user;
+    memset(kv, 0, sizeof(*kv));
 }
 
 static size_t kv_snapshot(void *user, void *buf, size_t buf_size) {

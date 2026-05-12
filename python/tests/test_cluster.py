@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 from raft_rx import Command, ManualClock, Message, MessageKind, NodeConfig, RaftCluster
 from raft_rx.cluster import ClusterNodePaths
 from raft_rx.configuration import ClusterConfiguration
+from raft_rx.messages import LogEntry
 
 try:
     from python.examples.kv_app import KVApp
@@ -258,3 +260,46 @@ def test_leader_steps_down_on_higher_term_append_entries_response(tmp_path: Path
     updated = cluster.nodes[leader.node_id]
     assert updated.role.name == "FOLLOWER"
     assert updated.current_term == higher_term
+
+
+def test_follower_rebuilds_applied_state_when_merge_replaces_committed_log(tmp_path: Path) -> None:
+    cluster = make_dynamic_cluster(tmp_path)
+    add_dynamic_node(cluster, tmp_path, "n1", ["n1", "n2"])
+    follower = cluster.nodes["n1"]
+    application = cast(Any, follower.application)
+
+    old_a = Command(op="set", key="a", value="1")
+    old_b = Command(op="set", key="b", value="2")
+    follower.log = [
+        LogEntry(index=1, term=1, command=old_a, leader_id="n1"),
+        LogEntry(index=2, term=1, command=old_b, leader_id="n1"),
+    ]
+    follower.commit_index = 2
+    follower.last_applied = 2
+    application.apply(old_a)
+    application.apply(old_b)
+
+    winning_c = Command(op="set", key="c", value="3")
+    cluster.transport.send(
+        Message(
+            kind=MessageKind.APPEND_ENTRIES,
+            term=2,
+            source="n3",
+            target="n1",
+            payload={
+                "prev_log_index": 0,
+                "prev_log_term": 0,
+                "prev_log_leader_id": "",
+                "entries": [LogEntry(index=1, term=1, command=winning_c, leader_id="n3").to_dict()],
+                "leader_commit": 1,
+            },
+        )
+    )
+
+    cluster.run(2, advance_ms=10)
+
+    assert follower.commit_index == 1
+    assert follower.last_applied == 1
+    assert application.get("a") is None
+    assert application.get("b") is None
+    assert application.get("c") == "3"
