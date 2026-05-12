@@ -278,8 +278,8 @@ for (int i = 0; i < 100; ++i)
 
 ### 6.2 TCP transport (multi-process — production)
 
-Each process hosts one node.  Include `raft/raft_tcp_transport.h` and add
-`raft_tcp_transport.c` to your build (it is **not** in `libraft_rx.a`).
+Each process hosts one node.  Include `raft/raft_tcp_transport.h` and link
+`libraft_rx.a`.
 
 ```c
 raft_tcp_transport_t tcp;
@@ -650,14 +650,9 @@ $(TARGET): $(SRC) $(LIBS)
 	$(CC) -std=c99 -O2 $(INCLUDES) -o $@ $(SRC) $(LIBS)
 ```
 
-`libraft_rx.a` contains `raft.c`, `raft_transport.c`, and `raft_storage.c`.
-The following are **not** included and must be compiled directly into your
-binary if you use them:
-
-| File | When needed |
-|---|---|
-| `src/raft_tcp_transport.c` | When using the TCP transport |
-| `src/raft_kv_app.c` | When using the built-in key-value application |
+`libraft_rx.a` contains the public C implementation: `raft.c`,
+`raft_transport.c`, `raft_storage.c`, `raft_tcp_transport.c`, and
+`raft_kv_app.c`.
 
 ### Minimal example
 

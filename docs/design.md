@@ -313,9 +313,8 @@ In C, the available observability is optional `rxnet` tracing
 - `include/raft/raft_kv_app.h`
 - `include/raft/raft_tcp_transport.h`
 
-`libraft_rx.a` contains the core, in-memory transport, and file persistence.
-`raft_tcp_transport.c` and `raft_kv_app.c` are compiled together with the
-application when TCP or the sample KV state machine is needed.
+`libraft_rx.a` contains the core, in-memory transport, file persistence, TCP
+transport, and sample KV state machine.
 
 ## Deliberate Differences Between C and Python
 

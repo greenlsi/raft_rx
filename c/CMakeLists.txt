@@ -21,6 +21,8 @@ set(RAFT_SOURCES
     src/raft.c
     src/raft_transport.c
     src/raft_storage.c
+    src/raft_kv_app.c
+    src/raft_tcp_transport.c
 )
 
 add_library(raft_rx STATIC ${RAFT_SOURCES})
@@ -34,18 +36,14 @@ target_include_directories(raft_rx_trace PUBLIC include ${RXNET_INCLUDE_DIR})
 target_compile_definitions(raft_rx_trace PUBLIC RX_TRACE_ENABLE)
 target_link_libraries(raft_rx_trace PUBLIC rxnet_trace)
 
-add_library(raft_kv_app STATIC src/raft_kv_app.c)
-target_include_directories(raft_kv_app PUBLIC include)
-target_link_libraries(raft_kv_app PUBLIC raft_rx)
-
 add_executable(raft_kv_cluster examples/kv_cluster.c)
-target_link_libraries(raft_kv_cluster PRIVATE raft_kv_app raft_rx)
+target_link_libraries(raft_kv_cluster PRIVATE raft_rx)
 
 add_executable(raft_kv_cluster_trace examples/kv_cluster_trace.c)
-target_link_libraries(raft_kv_cluster_trace PRIVATE raft_kv_app raft_rx_trace)
+target_link_libraries(raft_kv_cluster_trace PRIVATE raft_rx_trace)
 
 add_executable(test_raft tests/test_raft.c)
-target_link_libraries(test_raft PRIVATE raft_kv_app raft_rx)
+target_link_libraries(test_raft PRIVATE raft_rx)
 
 enable_testing()
 add_test(NAME test_raft COMMAND test_raft)

@@ -10,8 +10,7 @@ RAFT_LIB := $(C_ROOT)/build/libraft_rx.a
 RXNET_LIB := $(RXNET_C_ROOT)/build/librxnet.a
 
 TARGET := build/raft_node
-SRC := src/main.c src/demo_args.c src/demo_kv_app.c src/cli_fsm.c \
-       $(C_ROOT)/src/raft_kv_app.c $(C_ROOT)/src/raft_tcp_transport.c
+SRC := src/main.c src/demo_args.c src/demo_kv_app.c src/cli_fsm.c
 
 all: $(TARGET)
 
