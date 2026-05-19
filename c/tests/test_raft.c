@@ -68,6 +68,46 @@ static raft_node_config_t make_learner_config(const char *node_id, int election_
     return config;
 }
 
+typedef struct {
+    int value;
+} test_counter_t;
+
+static void test_counter_apply(void *user, const raft_command_t *command) {
+    test_counter_t *counter = (test_counter_t *)user;
+    if (strcmp(command->op, "inc") == 0)
+        counter->value++;
+}
+
+static void test_counter_reload(void *user) {
+    ((test_counter_t *)user)->value = 0;
+}
+
+static size_t test_counter_snapshot(void *user, void *buf, size_t buf_size) {
+    test_counter_t *counter = (test_counter_t *)user;
+    int n = snprintf((char *)buf, buf_size, "%d\n", counter->value);
+    return (n > 0 && (size_t)n < buf_size) ? (size_t)n : 0;
+}
+
+static void test_counter_restore_snapshot(void *user, const void *buf, size_t size) {
+    test_counter_t *counter = (test_counter_t *)user;
+    char tmp[32];
+    size_t n = size < sizeof(tmp) - 1 ? size : sizeof(tmp) - 1;
+    memcpy(tmp, buf, n);
+    tmp[n] = '\0';
+    counter->value = atoi(tmp);
+}
+
+static raft_application_t test_counter_make_application(test_counter_t *counter) {
+    raft_application_t app;
+    memset(&app, 0, sizeof(app));
+    app.apply = test_counter_apply;
+    app.reload = test_counter_reload;
+    app.snapshot = test_counter_snapshot;
+    app.restore_snapshot = test_counter_restore_snapshot;
+    app.user = counter;
+    return app;
+}
+
 /* Adds 3 initial nodes to cluster; kv[] must have room for at least 3 entries. */
 static void build_cluster(raft_cluster_t *cluster, rx_fsm_runtime *rt,
                           const char *root, raft_kv_state_t kv[]) {
@@ -106,9 +146,11 @@ int main(void) {
     char add_members[4][RAFT_MAX_ID] = {"n1", "n2", "n3", "n4"};
     raft_node_config_t n4_config;
     char root_seq[] = "/tmp/raft-c-seq-test-XXXXXX";
+    char root_counter[] = "/tmp/raft-c-counter-test-XXXXXX";
 
     assert(mkdtemp(root) != NULL);
     assert(mkdtemp(root_seq) != NULL);
+    assert(mkdtemp(root_counter) != NULL);
     cluster   = calloc(1, sizeof(*cluster));
     restarted = calloc(1, sizeof(*restarted));
     sequential = calloc(1, sizeof(*sequential));
@@ -286,8 +328,57 @@ int main(void) {
     }
 
     {
+        raft_cluster_t *counter_cluster = calloc(1, sizeof(*counter_cluster));
+        raft_cluster_t *counter_restarted = calloc(1, sizeof(*counter_restarted));
+        rx_fsm_runtime rt_counter;
+        rx_fsm_runtime rt_counter_restart;
+        raft_node_config_t c1 = make_single_config("n1", 150);
+        test_counter_t counter_state;
+        test_counter_t restarted_counter_state;
+        raft_application_t counter_app;
+        raft_application_t restarted_counter_app;
+        raft_node_t *counter_leader;
+        raft_command_t inc;
+
+        assert(counter_cluster != NULL);
+        assert(counter_restarted != NULL);
+        assert(rx_fsm_runtime_init(&rt_counter, RAFT_MAX_NODES) == 0);
+        assert(raft_cluster_init(counter_cluster, &rt_counter) == 0);
+        counter_app = test_counter_make_application(&counter_state);
+        assert(raft_cluster_add_node(counter_cluster, &c1, root_counter, &counter_app, 0) != NULL);
+        for (i = 0; i < 80; ++i)
+            assert(raft_cluster_tick(counter_cluster, 10) == 0);
+        counter_leader = raft_cluster_leader(counter_cluster);
+        assert(counter_leader != NULL);
+
+        memset(&inc, 0, sizeof(inc));
+        strcpy(inc.op, "inc");
+        assert(raft_node_submit_command(counter_leader, &inc) == 0);
+        assert(raft_node_submit_command(counter_leader, &inc) == 0);
+        for (i = 0; i < 80; ++i)
+            assert(raft_cluster_tick(counter_cluster, 10) == 0);
+        assert(counter_state.value == 2);
+
+        raft_cluster_destroy(counter_cluster);
+        rx_fsm_runtime_free(&rt_counter);
+        free(counter_cluster);
+
+        assert(rx_fsm_runtime_init(&rt_counter_restart, RAFT_MAX_NODES) == 0);
+        assert(raft_cluster_init(counter_restarted, &rt_counter_restart) == 0);
+        restarted_counter_app = test_counter_make_application(&restarted_counter_state);
+        assert(raft_cluster_add_node(counter_restarted, &c1, root_counter,
+                                     &restarted_counter_app, 0) != NULL);
+        assert(raft_cluster_tick(counter_restarted, 1) == 0);
+        assert(restarted_counter_state.value == 2);
+
+        raft_cluster_destroy(counter_restarted);
+        rx_fsm_runtime_free(&rt_counter_restart);
+        free(counter_restarted);
+    }
+
+    {
         char root_merge[] = "/tmp/raft-c-merge-test-XXXXXX";
-        raft_cluster_t merge_cluster;
+        raft_cluster_t *merge_cluster = calloc(1, sizeof(*merge_cluster));
         rx_fsm_runtime rt_merge;
         raft_node_config_t m1 = make_single_config("n1", 150);
         raft_kv_state_t merge_kv;
@@ -296,12 +387,13 @@ int main(void) {
         raft_command_t old_a, old_b, winning_c;
         raft_message_t append;
 
+        assert(merge_cluster != NULL);
         assert(mkdtemp(root_merge) != NULL);
         assert(rx_fsm_runtime_init(&rt_merge, RAFT_MAX_NODES) == 0);
-        assert(raft_cluster_init(&merge_cluster, &rt_merge) == 0);
+        assert(raft_cluster_init(merge_cluster, &rt_merge) == 0);
         raft_kv_state_init(&merge_kv);
         merge_app = raft_kv_make_application(&merge_kv);
-        follower = raft_cluster_add_node(&merge_cluster, &m1, root_merge, &merge_app, 0);
+        follower = raft_cluster_add_node(merge_cluster, &m1, root_merge, &merge_app, 0);
         assert(follower != NULL);
 
         memset(&old_a, 0, sizeof(old_a));
@@ -344,10 +436,10 @@ int main(void) {
         append.entries[0].term = 1;
         strcpy(append.entries[0].leader_id, "n3");
         append.entries[0].command = winning_c;
-        assert(raft_memory_transport_send(&merge_cluster.transport, &append) == 0);
+        assert(raft_memory_transport_send(&merge_cluster->transport, &append) == 0);
 
-        assert(raft_cluster_tick(&merge_cluster, 10) == 0);
-        assert(raft_cluster_tick(&merge_cluster, 10) == 0);
+        assert(raft_cluster_tick(merge_cluster, 10) == 0);
+        assert(raft_cluster_tick(merge_cluster, 10) == 0);
 
         assert(follower->commit_index == 1);
         assert(follower->last_applied == 1);
@@ -355,8 +447,9 @@ int main(void) {
         assert(strcmp(raft_kv_get(&merge_kv, "b"), "") == 0);
         assert(strcmp(raft_kv_get(&merge_kv, "c"), "3") == 0);
 
-        raft_cluster_destroy(&merge_cluster);
+        raft_cluster_destroy(merge_cluster);
         rx_fsm_runtime_free(&rt_merge);
+        free(merge_cluster);
     }
 
     free(cluster);

@@ -150,6 +150,31 @@ static void write_snapshot(FILE *fp, void *arg) {
     }
 }
 
+static int split_log_fields(char *line, char *fields[], size_t expected) {
+    size_t i;
+    char *p = line;
+    for (i = 0; i < expected; ++i) {
+        char *sep;
+        fields[i] = p;
+        if (i + 1 == expected) {
+            sep = strchr(p, '\n');
+            if (sep) *sep = '\0';
+            return 0;
+        }
+        sep = strchr(p, '|');
+        if (!sep) return -1;
+        *sep = '\0';
+        p = sep + 1;
+    }
+    return -1;
+}
+
+static void copy_field(char *dst, size_t dst_size, const char *src) {
+    if (dst_size == 0) return;
+    strncpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
+}
+
 void raft_storage_node_save(raft_node_t *node) {
     char meta_path[600];
     char log_path[600];
@@ -267,15 +292,28 @@ void raft_storage_node_load(raft_node_t *node) {
     if (fp != NULL) {
         while (fgets(line, sizeof(line), fp) != NULL && node->log_count < RAFT_MAX_LOG) {
             raft_log_entry_t entry;
+            char parsed[512];
+            char *fields[6];
             memset(&entry, 0, sizeof(entry));
-            /* New 6-field format: index|term|leader_id|op|key|value */
-            if (sscanf(line, "%d|%d|%15[^|]|%31[^|]|%63[^|]|%127[^\n]",
-                       &entry.index, &entry.term, entry.leader_id,
-                       entry.command.op, entry.command.key, entry.command.value) != 6) {
-                /* Backward-compat: old 5-field format without leader_id */
-                if (sscanf(line, "%d|%d|%31[^|]|%63[^|]|%127[^\n]",
-                           &entry.index, &entry.term, entry.command.op,
-                           entry.command.key, entry.command.value) != 5) continue;
+            strncpy(parsed, line, sizeof(parsed) - 1);
+            parsed[sizeof(parsed) - 1] = '\0';
+            if (split_log_fields(parsed, fields, 6) == 0) {
+                entry.index = atoi(fields[0]);
+                entry.term  = atoi(fields[1]);
+                copy_field(entry.leader_id, sizeof(entry.leader_id), fields[2]);
+                copy_field(entry.command.op, sizeof(entry.command.op), fields[3]);
+                copy_field(entry.command.key, sizeof(entry.command.key), fields[4]);
+                copy_field(entry.command.value, sizeof(entry.command.value), fields[5]);
+            } else {
+                /* Backward-compat: old 5-field format without leader_id. */
+                strncpy(parsed, line, sizeof(parsed) - 1);
+                parsed[sizeof(parsed) - 1] = '\0';
+                if (split_log_fields(parsed, fields, 5) != 0) continue;
+                entry.index = atoi(fields[0]);
+                entry.term  = atoi(fields[1]);
+                copy_field(entry.command.op, sizeof(entry.command.op), fields[2]);
+                copy_field(entry.command.key, sizeof(entry.command.key), fields[3]);
+                copy_field(entry.command.value, sizeof(entry.command.value), fields[4]);
             }
             if (entry.index <= node->snapshot_last_included_index) continue;
             node->log[node->log_count++] = entry;
