@@ -21,15 +21,29 @@
 extern "C" {
 #endif
 
+#ifndef RAFT_MAX_NODES
 #define RAFT_MAX_NODES 8
-#define RAFT_MAX_PEERS 7
+#endif
+/* RAFT_MAX_PEERS is derived; override RAFT_MAX_NODES instead. */
+#define RAFT_MAX_PEERS (RAFT_MAX_NODES - 1)
+#ifndef RAFT_MAX_ID
 #define RAFT_MAX_ID 16
+#endif
+#ifndef RAFT_MAX_LOG
 #define RAFT_MAX_LOG 128
+#endif
+#ifndef RAFT_MAX_QUEUE
 #define RAFT_MAX_QUEUE 256
+#endif
+#ifndef RAFT_MAX_BATCH
 #define RAFT_MAX_BATCH 16
+#endif
+#ifndef RAFT_MAX_KEY
 #define RAFT_MAX_KEY 64
+#endif
+#ifndef RAFT_MAX_VALUE
 #define RAFT_MAX_VALUE 128
-
+#endif
 #ifndef RAFT_MAX_SNAPSHOT_SIZE
 #define RAFT_MAX_SNAPSHOT_SIZE 4096
 #endif
