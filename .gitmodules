@@ -1,0 +1,3 @@
+[submodule "c/third_party/coreMQTT"]
+	path = c/third_party/coreMQTT
+	url = https://github.com/FreeRTOS/coreMQTT.git
