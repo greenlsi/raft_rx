@@ -107,6 +107,23 @@ Build the trace-enabled variant:
 make -C c build/libraft_rx_trace.a
 ```
 
+#### Memory footprint
+
+All size constants (`RAFT_MAX_NODES`, `RAFT_MAX_QUEUE`, `RAFT_MAX_BATCH`, …)
+use `#ifndef` guards and can be overridden via compiler `-D` flags without
+touching any source file.  The defaults are sized for desktop / server use
+(≈ 42 MB per `raft_cluster_t`).  For embedded targets such as ESP32, pass
+small values at build time:
+
+```bash
+make -C c CPPFLAGS="-DRAFT_MAX_NODES=3 -DRAFT_MAX_QUEUE=8 -DRAFT_MAX_BATCH=4 \
+                    -DRAFT_MAX_LOG=32 -DRAFT_MAX_KEY=32 -DRAFT_MAX_VALUE=64"
+```
+
+This reduces `raft_cluster_t` to ≈ 104 KB.  See [section 13 of the C user
+guide](docs/user-c.md#13-limits-reference) for the full table and ESP32
+CMake snippet.
+
 ## Standalone Demo Applications
 
 The standalone demos run one Raft node per process and demonstrate how the core

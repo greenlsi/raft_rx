@@ -607,27 +607,76 @@ heartbeats before the restarting node launches a new election.
 
 ## 13. Limits reference
 
-| Constant | Default | Override? | Meaning |
-|---|---|---|---|
-| `RAFT_MAX_NODES` | 8 | Yes | Maximum nodes per cluster |
-| `RAFT_MAX_PEERS` | 7 | Yes | Maximum peers per node (= `RAFT_MAX_NODES - 1`) |
-| `RAFT_MAX_ID` | 16 | Yes | Node ID buffer size including `\0` |
-| `RAFT_MAX_LOG` | 128 | Yes | Log entries kept before compaction is forced |
-| `RAFT_MAX_QUEUE` | 256 | Yes | Message queue depth (per node, per direction) |
-| `RAFT_MAX_BATCH` | 16 | Yes | Max entries per `AppendEntries` RPC |
-| `RAFT_MAX_KEY` | 64 | Yes | `raft_command_t.key` buffer size |
-| `RAFT_MAX_VALUE` | 128 | Yes | `raft_command_t.value` buffer size |
-| `RAFT_MAX_SNAPSHOT_SIZE` | 4096 | Yes | Snapshot buffer in bytes |
-| `RAFT_KV_MAX_PAIRS` | 128 | Yes | Pairs in the built-in KV application |
+All size constants use `#ifndef` guards and can be overridden at compile time.
+The recommended method is via compiler `-D` flags so the value is consistent
+across every translation unit without touching source files:
 
-Override any constant before including `raft.h`, consistently across all
-translation units:
-
-```c
-#define RAFT_MAX_NODES 16
-#define RAFT_MAX_SNAPSHOT_SIZE (256 * 1024)
-#include "raft/raft.h"
+```bash
+make CPPFLAGS="-DRAFT_MAX_NODES=3 -DRAFT_MAX_QUEUE=8 -DRAFT_MAX_BATCH=4"
 ```
+
+or in a `Makefile`:
+
+```makefile
+CPPFLAGS += -DRAFT_MAX_NODES=3 -DRAFT_MAX_QUEUE=8 -DRAFT_MAX_BATCH=4 \
+            -DRAFT_MAX_LOG=32 -DRAFT_MAX_KEY=32 -DRAFT_MAX_VALUE=64
+```
+
+### Constant table
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `RAFT_MAX_NODES` | 8 | Maximum nodes per cluster |
+| `RAFT_MAX_PEERS` | `RAFT_MAX_NODES - 1` | Derived — set `RAFT_MAX_NODES` to change both |
+| `RAFT_MAX_ID` | 16 | Node ID buffer size including `\0` |
+| `RAFT_MAX_LOG` | 128 | Log entries kept before compaction is forced |
+| `RAFT_MAX_QUEUE` | 256 | Message queue depth (outbox and pending queues per node) |
+| `RAFT_MAX_BATCH` | 16 | Max log entries per `AppendEntries` RPC |
+| `RAFT_MAX_KEY` | 64 | `raft_command_t.key` buffer size including `\0` |
+| `RAFT_MAX_VALUE` | 128 | `raft_command_t.value` buffer size including `\0` |
+| `RAFT_MAX_SNAPSHOT_SIZE` | 4096 | Snapshot buffer in bytes |
+| `RAFT_KV_MAX_PAIRS` | 128 | Pairs in the built-in KV application |
+
+### Memory footprint
+
+`RAFT_MAX_QUEUE` and `RAFT_MAX_BATCH` are the dominant drivers of memory use
+because every queued message (`raft_message_t`) carries a full log-entry batch
+inline.  The table below shows the effect on key struct sizes:
+
+| Build profile | `raft_message_t` | `raft_node_t` | `raft_cluster_t` |
+|---|--:|--:|--:|
+| **Desktop defaults** (nodes=8, queue=256, batch=16, key=64, value=128) | 4 064 B | 4 199 KB | 42 MB |
+| **ESP32** (nodes=3, queue=8, batch=4, log=32, key=32, value=64) | 704 B | 28 KB | 104 KB |
+
+The 42 MB desktop default is intentional for server/simulation use; it allows
+`RAFT_MAX_NODES × RAFT_MAX_QUEUE = 2 048` messages to be buffered simultaneously
+without dynamic allocation.  On embedded targets the constants must be reduced.
+
+### ESP32 / embedded profile
+
+For an ESP32 cluster with the MQTT transport, add these flags to your
+`CMakeLists.txt` or `idf_component.cmake`:
+
+```cmake
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    RAFT_MAX_NODES=3
+    RAFT_MAX_QUEUE=8
+    RAFT_MAX_BATCH=4
+    RAFT_MAX_LOG=32
+    RAFT_MAX_KEY=32
+    RAFT_MAX_VALUE=64
+    RAFT_MAX_SNAPSHOT_SIZE=512
+)
+```
+
+This brings `raft_cluster_t` to ~104 KB, well within the 520 KB SRAM of an
+ESP32 (or ESP32-S3 PSRAM budget).  The in-memory transport is not used with
+MQTT, so `raft_memory_transport_t` — the second-largest contributor — remains
+allocated but is effectively dead weight; a future refactor may make it
+optional.
+
+> **Rule**: `RAFT_MAX_PEERS` is always `RAFT_MAX_NODES - 1` and is computed
+> automatically.  Never define `RAFT_MAX_PEERS` directly.
 
 ---
 
