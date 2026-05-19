@@ -263,6 +263,79 @@ static void test_send_disabled_no_publish(void) {
     printf("PASS test_send_disabled_no_publish\n");
 }
 
+static void test_join_first_call_subscribes_and_announces(void) {
+    mock_ctx_t m; memset(&m, 0, sizeof(m));
+    raft_mqtt_hal_t hal = mock_hal_make(&m);
+    raft_mqtt_transport_t mqtt;
+    raft_mqtt_config_t cfg = make_cfg("mycluster", "n1");
+
+    assert(raft_mqtt_transport_init(&mqtt, &cfg, &hal) == 0);
+    assert(raft_mqtt_transport_start(&mqtt) == 0);
+
+    /* inbox subscribed during start; no join sub yet */
+    assert(m.sub_count == 1);
+    assert(m.pub_count == 0);
+
+    raft_mqtt_join_t out[4];
+    raft_mqtt_transport_recv_joins(&mqtt, out, 4);
+
+    /* After first recv_joins: subscribed to join topic, published own id */
+    assert(m.sub_count == 2);
+    assert(strcmp(m.subscribed[1], "raft/mycluster/join") == 0);
+    assert(m.pub_count == 1);
+    assert(strcmp(m.published[0].topic, "raft/mycluster/join") == 0);
+    assert(strncmp((char *)m.published[0].payload, "n1",
+                   m.published[0].payload_len) == 0);
+    printf("PASS test_join_first_call_subscribes_and_announces\n");
+}
+
+static void test_join_second_call_no_extra_subscribe(void) {
+    mock_ctx_t m; memset(&m, 0, sizeof(m));
+    raft_mqtt_hal_t hal = mock_hal_make(&m);
+    raft_mqtt_transport_t mqtt;
+    raft_mqtt_config_t cfg = make_cfg("mycluster", "n1");
+
+    assert(raft_mqtt_transport_init(&mqtt, &cfg, &hal) == 0);
+    assert(raft_mqtt_transport_start(&mqtt) == 0);
+
+    raft_mqtt_join_t out[4];
+    raft_mqtt_transport_recv_joins(&mqtt, out, 4);
+    size_t sub_after_first = m.sub_count;
+    size_t pub_after_first = m.pub_count;
+
+    raft_mqtt_transport_recv_joins(&mqtt, out, 4);
+    assert(m.sub_count == sub_after_first);  /* no duplicate subscribe */
+    assert(m.pub_count == pub_after_first);  /* no duplicate announce */
+    printf("PASS test_join_second_call_no_extra_subscribe\n");
+}
+
+static void test_join_recv_returns_joining_node_id(void) {
+    mock_ctx_t m; memset(&m, 0, sizeof(m));
+    raft_mqtt_hal_t hal = mock_hal_make(&m);
+    raft_mqtt_transport_t mqtt;
+    raft_mqtt_config_t cfg = make_cfg("mycluster", "n1");
+
+    assert(raft_mqtt_transport_init(&mqtt, &cfg, &hal) == 0);
+    assert(raft_mqtt_transport_start(&mqtt) == 0);
+
+    raft_mqtt_join_t out[4];
+    raft_mqtt_transport_recv_joins(&mqtt, out, 4);  /* init join */
+
+    /* Simulate n3 announcing itself on the join topic */
+    const char *joining = "n3";
+    mock_inject(&m, "raft/mycluster/join", joining, strlen(joining));
+
+    /* recv() routes join-topic messages into join_queue */
+    raft_message_t msgs[4];
+    raft_transport_t t = raft_mqtt_transport_make(&mqtt);
+    t.recv(t.ctx, msgs, 4);
+
+    size_t count = raft_mqtt_transport_recv_joins(&mqtt, out, 4);
+    assert(count == 1);
+    assert(strcmp(out[0].node_id, "n3") == 0);
+    printf("PASS test_join_recv_returns_joining_node_id\n");
+}
+
 int main(void) {
     test_init_subscribes_to_inbox();
     test_send_publishes_to_peer_topic();
@@ -271,6 +344,9 @@ int main(void) {
     test_recv_ignores_unknown_topic();
     test_submit_recv_commands_local();
     test_send_disabled_no_publish();
+    test_join_first_call_subscribes_and_announces();
+    test_join_second_call_no_extra_subscribe();
+    test_join_recv_returns_joining_node_id();
     printf("All MQTT transport tests passed.\n");
     return 0;
 }
